@@ -1,0 +1,19 @@
+# Unreal Engine generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.suo
+*.xcodeproj
+*.xcworkspace
+
+# Exclude default template starter heavy folders not used by the stages
+Content/Characters/
+Content/Weapons/
+Content/Variant_Horror/
+Content/Variant_Shooter/
