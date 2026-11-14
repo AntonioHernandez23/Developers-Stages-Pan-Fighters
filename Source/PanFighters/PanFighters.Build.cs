@@ -18,13 +18,15 @@ public class PanFighters : ModuleRules
 			"StateTreeModule",
 			"GameplayStateTreeModule",
 			"UMG",
-			"Slate"
+			"Slate",
+			"SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
 		PublicIncludePaths.AddRange(new string[] {
 			"PanFighters",
+			"PanFighters/UI",
 			"PanFighters/Variant_Horror",
 			"PanFighters/Variant_Horror/UI",
 			"PanFighters/Variant_Shooter",
