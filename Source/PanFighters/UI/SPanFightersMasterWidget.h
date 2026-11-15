@@ -74,6 +74,12 @@ public:
 	/** Notifies that a stage has been entered */
 	void NotifyStageEntered(EPanFightersStage Stage, const FText& InStageName, const FText& InStageSubtitle);
 
+	/** Displays a timed round/combat banner overlay in InGameBannerContainer */
+	void NotifyRoundBanner(const FText& Headline, const FText& Subline, const FText& FooterNote = FText::GetEmpty(), float DisplayDuration = 2.4f);
+
+	/** Immediately hides any active in-game announcement banner */
+	void HideInGameBanner();
+
 	/** Triggers full screen red hit vignette reaction when player receives damage */
 	void TriggerHitReaction(float DamageAmount = 25.0f);
 
@@ -122,6 +128,12 @@ private:
 		const FLinearColor& AccentColor = FLinearColor(0.95f, 0.72f, 0.20f, 1.0f)
 	);
 
+	TSharedRef<SWidget> BuildWoodenNavButton(
+		const FText& ButtonText,
+		FOnClicked OnClicked,
+		float ButtonWidth = 230.0f
+	);
+
 	// Callbacks
 	FReply OnPlayClicked();
 	FReply OnOptionsClicked();
@@ -155,6 +167,8 @@ private:
 	FText GetRivalNameText() const;
 	const FSlateBrush* GetRivalAvatarBrush() const;
 	FSlateColor ComputeHealthColor(float Ratio) const;
+	FText GetRoundText() const;
+	FText GetRoundScoreText() const;
 
 	// Hit Reaction helpers
 	FSlateColor GetHitReactionColor() const;
@@ -178,11 +192,22 @@ private:
 	FText ActiveStageName;
 	FText ActiveStageSubtitle;
 
+	// Settings helpers
+	void LoadDisplayAndQualitySettings();
+	void ApplyGraphicsQuality(int32 NewLevel);
+	void ApplyWindowMode(int32 NewModeIndex);
+	void ApplyFrameRateCap(int32 NewCapValue);
+	void ResetOptionsToDefaults();
+
 	// Settings state
 	float MasterVolume = 1.0f;
 	float MusicVolume = 0.8f;
 	float SFXVolume = 0.9f;
+	float SavedMasterBeforeMute = 1.0f;
+	bool bAudioMuted = false;
 	int32 GraphicsQualityLevel = 3;
+	int32 DisplayWindowModeIndex = 1; // 0 = Fullscreen, 1 = Borderless, 2 = Windowed
+	int32 FrameRateCapValue = 0;      // 0 = Unlimited, 60, 120
 
 	// Localization state (false = Español, true = English)
 	bool bIsEnglish = false;
@@ -204,6 +229,7 @@ private:
 	TSharedPtr<FSlateBrush> BrushPolloBlanco;
 	TSharedPtr<FSlateBrush> BrushPolloChocolate;
 	TSharedPtr<FSlateBrush> BrushPolloAmarillo;
+	TSharedPtr<FSlateBrush> BrushGalloGato;
 	TSharedPtr<FSlateBrush> BrushTitleBanner;
 	TSharedPtr<FSlateBrush> BrushCardBg;
 	TSharedPtr<FSlateBrush> BrushGridBg;

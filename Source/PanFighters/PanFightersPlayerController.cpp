@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PanFightersPlayerController.h"
+#include "PanFightersCharacter.h"
 #include "PanFightersSkyDrop.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
@@ -32,43 +33,215 @@
 #include "Sound/SoundWave.h"
 #include "Misc/ConfigCacheIni.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSingleNodeInstance.h"
 
 namespace
 {
-	void ApplyRoosterSkinMaterials(AActor* RoosterActor, EPanFightersCharacter Character)
+	FText GetRoosterDisplayName(EPanFightersCharacter Character)
+	{
+		switch (Character)
+		{
+		case EPanFightersCharacter::PolloChocolate:
+			return FText::FromString(TEXT("POLLO CHOCOLATE"));
+		case EPanFightersCharacter::PolloAmarillo:
+			return FText::FromString(TEXT("POLLO AMARILLO"));
+		case EPanFightersCharacter::GalloGato:
+			return FText::FromString(TEXT("GALLO GATO"));
+		case EPanFightersCharacter::PolloBlanco:
+		default:
+			return FText::FromString(TEXT("POLLO BLANCO"));
+		}
+	}
+
+	USkeletalMeshComponent* ResolvePrimaryRoosterMesh(AActor* RoosterActor)
 	{
 		if (!RoosterActor)
+		{
+			return nullptr;
+		}
+		if (ACharacter* CharActor = Cast<ACharacter>(RoosterActor))
+		{
+			if (USkeletalMeshComponent* MainMesh = CharActor->GetMesh())
+			{
+				return MainMesh;
+			}
+		}
+		TInlineComponentArray<USkeletalMeshComponent*> SkeletalMeshes(RoosterActor);
+		for (USkeletalMeshComponent* MeshComp : SkeletalMeshes)
+		{
+			if (MeshComp && !MeshComp->bOnlyOwnerSee)
+			{
+				return MeshComp;
+			}
+		}
+		return nullptr;
+	}
+
+	void SyncRoosterCameraRigOffset(AActor* RoosterActor, USkeletalMeshComponent* MainMesh, float TargetCameraCompensationZ)
+	{
+		APanFightersCharacter* PanChar = Cast<APanFightersCharacter>(RoosterActor);
+		USkeletalMeshComponent* FirstPersonMesh = PanChar ? PanChar->GetFirstPersonMesh() : nullptr;
+		if (!FirstPersonMesh || !MainMesh)
 		{
 			return;
 		}
 
-		const bool bChocolate = (Character == EPanFightersCharacter::PolloChocolate);
-		const TCHAR* BodyMatPath = bChocolate
-			? TEXT("/Game/Characters/GalloBlanco/Textures/M_GalloChocolate.M_GalloChocolate")
-			: TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001");
-		const TCHAR* ChestCapMatPath = bChocolate
-			? TEXT("/Game/Characters/GalloBlanco/Textures/MI_Chest_Chocolate_Cap.MI_Chest_Chocolate_Cap")
-			: TEXT("/Game/Characters/GalloBlanco/Textures/Chest_White_Cap.Chest_White_Cap");
-
-		UMaterialInterface* BodyMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, BodyMatPath));
-		UMaterialInterface* ChestCapMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, ChestCapMatPath));
-
-		TInlineComponentArray<USkeletalMeshComponent*> SkeletalMeshes(RoosterActor);
-		for (USkeletalMeshComponent* MeshComp : SkeletalMeshes)
+		// FirstPersonMesh (parent of FirstPersonCamera) is attached to CharacterMesh0 in BP_GalloBlanco,
+		// so compensating its local Z keeps the third-person camera at identical height when MainMesh drops -95cm.
+		if (FirstPersonMesh->GetAttachParent() == MainMesh)
 		{
-			if (!MeshComp)
+			FVector FPRelLoc = FirstPersonMesh->GetRelativeLocation();
+			if (!FMath::IsNearlyEqual(FPRelLoc.Z, TargetCameraCompensationZ, 0.5f))
 			{
-				continue;
-			}
-			if (BodyMat)
-			{
-				MeshComp->SetMaterial(0, BodyMat);
-			}
-			if (ChestCapMat)
-			{
-				MeshComp->SetMaterial(1, ChestCapMat);
+				FPRelLoc.Z = TargetCameraCompensationZ;
+				FirstPersonMesh->SetRelativeLocation(FPRelLoc);
 			}
 		}
+	}
+
+	void ApplyExplicitRoosterMaterials(AActor* RoosterActor, UMaterialInterface* BodyMat, UMaterialInterface* ChestCapMat, UMaterialInterface* GloveMat = nullptr)
+	{
+		USkeletalMeshComponent* MainMesh = ResolvePrimaryRoosterMesh(RoosterActor);
+		if (!MainMesh)
+		{
+			return;
+		}
+
+		if (USkeletalMesh* BaseMesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/SK_GalloBoxeador_Mesh.SK_GalloBoxeador_Mesh"))))
+		{
+			if (MainMesh->GetSkeletalMeshAsset() != BaseMesh)
+			{
+				MainMesh->SetSkeletalMesh(BaseMesh);
+			}
+		}
+		MainMesh->SetRelativeLocation(FVector::ZeroVector);
+		SyncRoosterCameraRigOffset(RoosterActor, MainMesh, 0.0f);
+
+		if (BodyMat)
+		{
+			MainMesh->SetMaterial(0, BodyMat);
+		}
+		if (ChestCapMat)
+		{
+			MainMesh->SetMaterial(1, ChestCapMat);
+		}
+		if (!GloveMat)
+		{
+			GloveMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/Glove_Red_Cap.Glove_Red_Cap")));
+		}
+		if (GloveMat)
+		{
+			MainMesh->SetMaterial(2, GloveMat);
+		}
+	}
+
+	int32 ReadBpIntProperty(const AActor* Target, FName PropName, int32 DefaultVal = 0)
+	{
+		if (!Target)
+		{
+			return DefaultVal;
+		}
+		if (FIntProperty* Prop = FindFProperty<FIntProperty>(Target->GetClass(), PropName))
+		{
+			return Prop->GetPropertyValue_InContainer(Target);
+		}
+		return DefaultVal;
+	}
+
+	bool ReadBpBoolProperty(const AActor* Target, FName PropName, bool DefaultVal = false)
+	{
+		if (!Target)
+		{
+			return DefaultVal;
+		}
+		if (FBoolProperty* Prop = FindFProperty<FBoolProperty>(Target->GetClass(), PropName))
+		{
+			return Prop->GetPropertyValue_InContainer(Target);
+		}
+		return DefaultVal;
+	}
+
+	float ReadBpFloatProperty(const AActor* Target, FName PropName, float DefaultVal = 0.0f)
+	{
+		if (!Target)
+		{
+			return DefaultVal;
+		}
+		if (FDoubleProperty* DProp = FindFProperty<FDoubleProperty>(Target->GetClass(), PropName))
+		{
+			return static_cast<float>(DProp->GetPropertyValue_InContainer(Target));
+		}
+		if (FFloatProperty* FProp = FindFProperty<FFloatProperty>(Target->GetClass(), PropName))
+		{
+			return FProp->GetPropertyValue_InContainer(Target);
+		}
+		return DefaultVal;
+	}
+
+	struct FRoosterAnimSpec
+	{
+		const TCHAR* AnimPath;
+		bool bLoop;
+	};
+
+	FRoosterAnimSpec ResolveGalloGatoAnimSpec(int32 StateKey, int32& InOutJabCounter, bool bAdvanceJabCycle)
+	{
+		switch (StateKey)
+		{
+		case 1:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_02_Walk.Anim_02_Walk"), true };
+		case 2:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_03_Run.Anim_03_Run"), true };
+		case 3:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_09_Block_TwoHands.Anim_09_Block_TwoHands"), true };
+		case 4:
+		{
+			static const TCHAR* JabCycle[3] = {
+				TEXT("/Game/Characters/GalloGato/Animations/Anim_04_Jab_Left.Anim_04_Jab_Left"),
+				TEXT("/Game/Characters/GalloGato/Animations/Anim_05_Jab_Right.Anim_05_Jab_Right"),
+				TEXT("/Game/Characters/GalloGato/Animations/Anim_06_Cross_Right.Anim_06_Cross_Right")
+			};
+			const TCHAR* Selected = JabCycle[InOutJabCounter % 3];
+			if (bAdvanceJabCycle)
+			{
+				InOutJabCounter++;
+			}
+			return { Selected, false };
+		}
+		case 5:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_07_Hook_Left.Anim_07_Hook_Left"), false };
+		case 6:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_08_Uppercut_Right.Anim_08_Uppercut_Right"), false };
+		case 7:
+		case 9:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_10_Hit_React.Anim_10_Hit_React"), false };
+		case 8:  return { TEXT("/Game/Characters/GalloGato/Animations/Anim_11_Victory.Anim_11_Victory"), true };
+		case 12: return { TEXT("/Game/Characters/GalloGato/Animations/Anim_12_Defeat.Anim_12_Defeat"), false };
+		case 0:
+		default: return { TEXT("/Game/Characters/GalloGato/Animations/Anim_01_Idle_Guard.Anim_01_Idle_Guard"), true };
+		}
+	}
+
+	UAnimationAsset* GetActiveSingleNodeAnimAsset(const USkeletalMeshComponent* Mesh)
+	{
+		if (!Mesh)
+		{
+			return nullptr;
+		}
+		if (UAnimSingleNodeInstance* SingleNode = Mesh->GetSingleNodeInstance())
+		{
+			return SingleNode->GetCurrentAsset();
+		}
+		return Mesh->AnimationData.AnimToPlay;
+	}
+
+	void PlayRoosterSingleNodeAnim(USkeletalMeshComponent* Mesh, UAnimationAsset* Anim, bool bLoop)
+	{
+		if (!Mesh || !Anim)
+		{
+			return;
+		}
+		Mesh->AnimationData.AnimToPlay = Anim;
+		Mesh->AnimationData.bSavedLooping = bLoop;
+		Mesh->AnimationData.bSavedPlaying = true;
+		Mesh->AnimationData.SavedPosition = 0.0f;
+		Mesh->AnimationData.SavedPlayRate = 1.0f;
+		Mesh->PlayAnimation(Anim, bLoop);
 	}
 }
 
@@ -104,6 +277,38 @@ APanFightersPlayerController::APanFightersPlayerController()
 		{
 			FightMusic = FightFallbackFinder.Object;
 		}
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> VictoryMusicFinder(TEXT("/Game/Audio/BGM/Mus_Victory.Mus_Victory"));
+	if (VictoryMusicFinder.Succeeded())
+	{
+		VictoryMusic = VictoryMusicFinder.Object;
+	}
+	else
+	{
+		static ConstructorHelpers::FObjectFinder<USoundBase> VictoryFallbackFinder(TEXT("/Game/Audio/BGM/kf017812-jingle-win.kf017812-jingle-win"));
+		if (VictoryFallbackFinder.Succeeded())
+		{
+			VictoryMusic = VictoryFallbackFinder.Object;
+		}
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> BoxingBellFinder(TEXT("/Game/Audio/SFX/SFX_BoxingBell.SFX_BoxingBell"));
+	if (BoxingBellFinder.Succeeded())
+	{
+		BoxingBellSound = BoxingBellFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> PunchHitFinder(TEXT("/Game/Audio/SFX/SFX_Punch_Hit.SFX_Punch_Hit"));
+	if (PunchHitFinder.Succeeded())
+	{
+		PunchHitSound = PunchHitFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> RoosterHurtFinder(TEXT("/Game/Audio/SFX/SFX_Rooster_Hurt.SFX_Rooster_Hurt"));
+	if (RoosterHurtFinder.Succeeded())
+	{
+		RoosterHurtSound = RoosterHurtFinder.Object;
 	}
 }
 
@@ -255,12 +460,47 @@ void APanFightersPlayerController::StopBGM(float FadeTime)
 	}
 }
 
+void APanFightersPlayerController::PlaySFX2D(USoundBase* SoundToPlay, float VolumeMultiplier, float PitchMultiplier)
+{
+	if (!SoundToPlay)
+	{
+		return;
+	}
+
+	float SavedSFXVolume = 1.0f;
+	if (GConfig)
+	{
+		GConfig->GetFloat(TEXT("PanFighters.Audio"), TEXT("SFXVolume"), SavedSFXVolume, GGameUserSettingsIni);
+		SavedSFXVolume = FMath::Clamp(SavedSFXVolume, 0.0f, 1.0f);
+	}
+
+	UGameplayStatics::PlaySound2D(this, SoundToPlay, SavedSFXVolume * VolumeMultiplier, PitchMultiplier);
+}
+
+void APanFightersPlayerController::PlaySFXAtLocation(USoundBase* SoundToPlay, FVector Location, float VolumeMultiplier, float PitchMultiplier)
+{
+	if (!SoundToPlay || !GetWorld())
+	{
+		return;
+	}
+
+	float SavedSFXVolume = 1.0f;
+	if (GConfig)
+	{
+		GConfig->GetFloat(TEXT("PanFighters.Audio"), TEXT("SFXVolume"), SavedSFXVolume, GGameUserSettingsIni);
+		SavedSFXVolume = FMath::Clamp(SavedSFXVolume, 0.0f, 1.0f);
+	}
+
+	UGameplayStatics::PlaySoundAtLocation(this, SoundToPlay, Location, SavedSFXVolume * VolumeMultiplier, PitchMultiplier);
+}
+
 void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState NewState)
 {
 	const EPanFightersScreenState PreviousState = CurrentScreenState;
 	CurrentScreenState = NewState;
 
-	if (PreviousState == EPanFightersScreenState::CharacterSelect && NewState != EPanFightersScreenState::CharacterSelect)
+	if ((PreviousState == EPanFightersScreenState::CharacterSelect || PreviousState == EPanFightersScreenState::MatchResult) &&
+		NewState != PreviousState)
 	{
 		CleanupCharacterSelectScene();
 	}
@@ -284,7 +524,7 @@ void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState 
 	{
 		PlayBGM(SelectionMenuMusic, 0.8f);
 
-		SetupCharacterSelectScene();
+		SetupRoosterShowcaseScene(false, true);
 	}
 	else if (NewState == EPanFightersScreenState::StageSelect)
 	{
@@ -318,7 +558,35 @@ void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState 
 	}
 	else if (NewState == EPanFightersScreenState::MatchResult)
 	{
-		StopBGM(1.2f);
+		if (bLastMatchVictory)
+		{
+			if (!VictoryMusic)
+			{
+				VictoryMusic = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/BGM/Mus_Victory.Mus_Victory")));
+				if (!VictoryMusic)
+				{
+					VictoryMusic = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/BGM/kf017812-jingle-win.kf017812-jingle-win")));
+				}
+			}
+			if (VictoryMusic)
+			{
+				PlayBGM(VictoryMusic, 0.4f);
+			}
+			else
+			{
+				StopBGM(1.2f);
+			}
+		}
+		else
+		{
+			StopBGM(1.2f);
+		}
+		ClearStagePowerUps();
+		if (MasterMenuWidget.IsValid())
+		{
+			MasterMenuWidget->HideInGameBanner();
+		}
+		SetupRoosterShowcaseScene(true, bLastMatchVictory);
 	}
 
 	if (NewState == EPanFightersScreenState::InGame)
@@ -331,12 +599,12 @@ void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState 
 		SetInputMode(GameInputMode);
 		bShowMouseCursor = false;
 	}
-	else if (NewState == EPanFightersScreenState::InGameMenu || NewState == EPanFightersScreenState::MatchResult)
+	else if (NewState == EPanFightersScreenState::InGameMenu)
 	{
 		// Pause the game world physics and actors
 		UGameplayStatics::SetGamePaused(GetWorld(), true);
 
-		// Pause & Match Result menu interactive UI mode: show mouse cursor for clicking buttons
+		// Pause menu interactive UI mode: show mouse cursor for clicking buttons
 		FInputModeGameAndUI PauseInputMode;
 		PauseInputMode.SetHideCursorDuringCapture(false);
 		PauseInputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
@@ -345,7 +613,7 @@ void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState 
 	}
 	else
 	{
-		// Main Menu, Options, Stage Select, Splash
+		// Main Menu, Options, Character Select, Stage Select, Splash, MatchResult (live 3D victory anim)
 		UGameplayStatics::SetGamePaused(GetWorld(), false);
 
 		FInputModeUIOnly UIInputMode;
@@ -360,16 +628,44 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 	CleanupCharacterSelectScene();
 
 	CurrentStage = Stage;
+	CurrentRound = 1;
+	PlayerRoundWins = 0;
+	RivalRoundWins = 0;
+	bWaitingNextRound = false;
+	RoundTransitionTimer = 0.0f;
+	bMatchCompletedNormally = false;
 
-	// Reset combat states for the new / retried match
+	if (AActor* StageRival = GetActiveRival())
+	{
+		if (!CachedStageRivalSpawns.Contains(Stage))
+		{
+			CachedStageRivalSpawns.Add(Stage, StageRival->GetActorTransform());
+		}
+		CacheRivalAppearance(StageRival);
+	}
+
+	StartRound(true);
+}
+
+void APanFightersPlayerController::StartRound(bool bInitialStageEntry)
+{
+	if (CurrentStage == EPanFightersStage::None)
+	{
+		return;
+	}
+
+	// Reset round combat telemetry
 	bMatchResolved = false;
 	MatchFinishTimer = 0.0f;
+	bWaitingNextRound = false;
+	RoundTransitionTimer = 0.0f;
 	SkyDropRespawnTimer = 0.0f;
 	PunchTraumaPitch = 0.0f;
 	PunchTraumaRoll = 0.0f;
 	CurrentPlayerHealth = 100.0f;
 	PreviousPlayerHealth = 100.0f;
 	CurrentRivalHealth = 100.0f;
+	PreviousRivalHealth = 100.0f;
 
 	// Suppress any legacy WBP_ArenaHUD widget
 	for (TObjectIterator<UUserWidget> It; It; ++It)
@@ -388,7 +684,7 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 	FText StageNameText;
 	FText StageSubtitleText;
 
-	switch (Stage)
+	switch (CurrentStage)
 	{
 	case EPanFightersStage::Stage1_ElRanchito:
 		StageNameText = FText::FromString(TEXT("El Ranchito"));
@@ -418,8 +714,8 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 	ResetCharacterAndRivalStates();
 
 	// 3. Find stage references (Camera and/or PlayerStart)
-	ACameraActor* StageCam = FindStageCamera(Stage);
-	AActor* PlayerStartActor = FindStagePlayerStart(Stage);
+	ACameraActor* StageCam = FindStageCamera(CurrentStage);
+	AActor* PlayerStartActor = FindStagePlayerStart(CurrentStage);
 
 	// 4. Teleport character pawn to stage location in FIRST PERSON view
 	APawn* MyPawn = GetPawn();
@@ -456,14 +752,10 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 		TargetRotation.Roll = 0.0f;
 
 		MyPawn->TeleportTo(TargetLocation, TargetRotation, false, true);
-
-		// Orient the first-person controller rotation towards the stage
 		SetControlRotation(TargetRotation);
-
-		// Crucial: Set view target to the player's own pawn for true First-Person perspective!
 		SetViewTarget(MyPawn);
 
-		// Restore full internal health & baseline walk speed to player and stage rival
+		// Restore full internal health & baseline walk speed to player
 		SetActorHealth(MyPawn, MaxPlayerHealth);
 		if (ACharacter* MyChar = Cast<ACharacter>(MyPawn))
 		{
@@ -474,43 +766,133 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 			}
 		}
 
-		if (AActor* ActiveRival = GetActiveRival())
+		// Apply selected character mesh, ground pivot offset, and materials
+		ApplyRoosterAppearance(MyPawn, SelectedCharacter);
+		SyncGalloGatoCombatAnimation(MyPawn);
+	}
+
+	// Restore stage rival position, health, and baseline walk speed
+	if (AActor* ActiveRival = GetActiveRival())
+	{
+		if (const FTransform* InitialTransform = CachedStageRivalSpawns.Find(CurrentStage))
 		{
-			SetActorHealth(ActiveRival, MaxRivalHealth);
-			if (ACharacter* RivalChar = Cast<ACharacter>(ActiveRival))
-			{
-				if (UCharacterMovementComponent* RivalMove = RivalChar->GetCharacterMovement())
-				{
-					RivalMove->StopMovementImmediately();
-					RivalMove->MaxWalkSpeed = DefaultRivalWalkSpeed;
-				}
-			}
+			FRotator RivalRot = InitialTransform->Rotator();
+			RivalRot.Pitch = 0.0f;
+			RivalRot.Roll = 0.0f;
+			ActiveRival->SetActorLocationAndRotation(InitialTransform->GetLocation(), RivalRot, false, nullptr, ETeleportType::TeleportPhysics);
 		}
 
-		// Apply selected character skin across both body and first-person arm meshes
-		ApplyRoosterSkinMaterials(MyPawn, SelectedCharacter);
+		SetActorHealth(ActiveRival, MaxRivalHealth);
+		if (ACharacter* RivalChar = Cast<ACharacter>(ActiveRival))
+		{
+			if (UCharacterMovementComponent* RivalMove = RivalChar->GetCharacterMovement())
+			{
+				RivalMove->StopMovementImmediately();
+				RivalMove->MaxWalkSpeed = DefaultRivalWalkSpeed;
+			}
+		}
 	}
 
 	// 5. Regenerate stage items falling slowly from the sky onto the playable arena platform
-	RegenerateStagePowerUps(Stage);
+	RegenerateStagePowerUps(CurrentStage);
 
-	// 6. Notify widget and switch to InGame view
+	// 6. Notify widget and switch/refresh InGame HUD
 	if (MasterMenuWidget.IsValid())
 	{
-		MasterMenuWidget->NotifyStageEntered(Stage, StageNameText, StageSubtitleText);
-		MasterMenuWidget->SetScreenState(EPanFightersScreenState::InGame);
+		if (bInitialStageEntry)
+		{
+			MasterMenuWidget->NotifyStageEntered(CurrentStage, StageNameText, StageSubtitleText);
+			MasterMenuWidget->SetScreenState(EPanFightersScreenState::InGame);
+		}
+		else
+		{
+			MasterMenuWidget->NotifyRoundBanner(
+				FText::FromString(FString::Printf(TEXT("✦  ASALTO %d DE %d  ✦"), CurrentRound, MaxMatchRounds)),
+				FText::FromString(FString::Printf(TEXT("Marcador: %d - %d  •  El primero en 2 victorias gana"), PlayerRoundWins, RivalRoundWins)),
+				FText::FromString(TEXT("¡A pelear!")),
+				2.5f
+			);
+		}
 	}
 
 	// 7. Set input mode to first-person gameplay
 	FInputModeGameOnly GameInputMode;
 	SetInputMode(GameInputMode);
 	bShowMouseCursor = false;
+
+	// 8. Play Boxing Bell sound to announce the start of the round!
+	if (!BoxingBellSound)
+	{
+		BoxingBellSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_BoxingBell.SFX_BoxingBell")));
+	}
+	PlaySFX2D(BoxingBellSound, 1.0f, 1.0f);
+}
+
+void APanFightersPlayerController::HandleRoundEnded(bool bPlayerWonRound)
+{
+	if (bPlayerWonRound)
+	{
+		PlayerRoundWins = FMath::Min(RoundsToWinMatch, PlayerRoundWins + 1);
+	}
+	else
+	{
+		RivalRoundWins = FMath::Min(RoundsToWinMatch, RivalRoundWins + 1);
+	}
+
+	// First rooster to win 2 rounds wins the match immediately (2-0 or 2-1)
+	if (PlayerRoundWins >= RoundsToWinMatch || RivalRoundWins >= RoundsToWinMatch || CurrentRound >= MaxMatchRounds)
+	{
+		bMatchResolved = true;
+		bMatchCompletedNormally = true;
+		ShowMatchResult(PlayerRoundWins >= RivalRoundWins);
+		return;
+	}
+
+	// Otherwise schedule next round smoothly
+	bWaitingNextRound = true;
+	RoundTransitionTimer = 2.4f;
+	MatchFinishTimer = 0.0f;
+
+	if (MasterMenuWidget.IsValid())
+	{
+		const FText Headline = bPlayerWonRound
+			? FText::FromString(FString::Printf(TEXT("✦  ASALTO %d GANADO  ✦"), CurrentRound))
+			: FText::FromString(FString::Printf(TEXT("✦  ASALTO %d PARA EL RIVAL  ✦"), CurrentRound));
+		const FText Subline = FText::FromString(FString::Printf(TEXT("Marcador: %d - %d  •  Preparando Asalto %d"), PlayerRoundWins, RivalRoundWins, CurrentRound + 1));
+		MasterMenuWidget->NotifyRoundBanner(Headline, Subline, FText::FromString(TEXT("Recuperando energías...")), 2.3f);
+	}
+}
+
+void APanFightersPlayerController::CacheRivalAppearance(AActor* RivalActor)
+{
+	if (!RivalActor)
+	{
+		return;
+	}
+
+	TInlineComponentArray<USkeletalMeshComponent*> SkeletalMeshes(RivalActor);
+	for (USkeletalMeshComponent* MeshComp : SkeletalMeshes)
+	{
+		if (MeshComp && MeshComp->GetNumMaterials() > 0)
+		{
+			CachedRivalBodyMat = MeshComp->GetMaterial(0);
+			CachedRivalChestMat = (MeshComp->GetNumMaterials() > 1) ? MeshComp->GetMaterial(1) : nullptr;
+			break;
+		}
+	}
 }
 
 void APanFightersPlayerController::ToggleInGameMenu()
 {
 	if (CurrentScreenState == EPanFightersScreenState::InGame)
 	{
+		// Play Boxing Bell sound when pausing the match
+		if (!BoxingBellSound)
+		{
+			BoxingBellSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_BoxingBell.SFX_BoxingBell")));
+		}
+		PlaySFX2D(BoxingBellSound, 0.9f, 1.0f);
+
 		SetScreenState(EPanFightersScreenState::InGameMenu);
 	}
 	else if (CurrentScreenState == EPanFightersScreenState::InGameMenu)
@@ -570,10 +952,163 @@ AActor* APanFightersPlayerController::GetOrCreatePreviewRooster()
 	return nullptr;
 }
 
+void APanFightersPlayerController::ApplyRoosterAppearance(AActor* RoosterActor, EPanFightersCharacter InCharacter)
+{
+	USkeletalMeshComponent* MainMesh = ResolvePrimaryRoosterMesh(RoosterActor);
+	if (!MainMesh)
+	{
+		return;
+	}
+
+	LastSyncedGalloGatoActor.Reset();
+	LastGalloGatoAnimState = -1;
+	LastGalloGatoStateTimer = 0.0f;
+
+	if (InCharacter == EPanFightersCharacter::GalloGato)
+	{
+		if (USkeletalMesh* GalloGatoMesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, TEXT("/Game/Characters/GalloGato/SK_GalloGato_Mesh.SK_GalloGato_Mesh"))))
+		{
+			if (MainMesh->GetSkeletalMeshAsset() != GalloGatoMesh)
+			{
+				MainMesh->SetSkeletalMesh(GalloGatoMesh);
+			}
+		}
+		// SK_GalloGato_Mesh origin is at the soles of the feet (Z=0), while SK_GalloBoxeador_Mesh is centered at Z=95
+		MainMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -95.0f));
+		SyncRoosterCameraRigOffset(RoosterActor, MainMesh, 95.0f);
+
+		if (UMaterialInterface* BodyMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloGato/Materials/M_GalloGato_Body.M_GalloGato_Body"))))
+		{
+			MainMesh->SetMaterial(0, BodyMat);
+		}
+		if (UMaterialInterface* ChestMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloGato/Materials/M_GalloGato_ChestRosa.M_GalloGato_ChestRosa"))))
+		{
+			MainMesh->SetMaterial(1, ChestMat);
+		}
+		if (UMaterialInterface* GloveMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloGato/Materials/M_GalloGato_GloveMagenta.M_GalloGato_GloveMagenta"))))
+		{
+			MainMesh->SetMaterial(2, GloveMat);
+		}
+		return;
+	}
+
+	const bool bChocolate = (InCharacter == EPanFightersCharacter::PolloChocolate);
+	const TCHAR* BodyMatPath = bChocolate
+		? TEXT("/Game/Characters/GalloBlanco/Textures/M_GalloChocolate.M_GalloChocolate")
+		: TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001");
+	const TCHAR* ChestCapMatPath = bChocolate
+		? TEXT("/Game/Characters/GalloBlanco/Textures/MI_Chest_Chocolate_Cap.MI_Chest_Chocolate_Cap")
+		: TEXT("/Game/Characters/GalloBlanco/Textures/Chest_White_Cap.Chest_White_Cap");
+
+	UMaterialInterface* BodyMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, BodyMatPath));
+	UMaterialInterface* ChestCapMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, ChestCapMatPath));
+	ApplyExplicitRoosterMaterials(RoosterActor, BodyMat, ChestCapMat);
+}
+
+void APanFightersPlayerController::SyncGalloGatoCombatAnimation(AActor* TargetActor, bool bForceVictory)
+{
+	if (SelectedCharacter != EPanFightersCharacter::GalloGato || !IsValid(TargetActor))
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* MainMesh = ResolvePrimaryRoosterMesh(TargetActor);
+	if (!MainMesh)
+	{
+		return;
+	}
+
+	if (USkeletalMesh* ExpectedMesh = Cast<USkeletalMesh>(StaticLoadObject(USkeletalMesh::StaticClass(), nullptr, TEXT("/Game/Characters/GalloGato/SK_GalloGato_Mesh.SK_GalloGato_Mesh"))))
+	{
+		if (MainMesh->GetSkeletalMeshAsset() != ExpectedMesh)
+		{
+			ApplyRoosterAppearance(TargetActor, SelectedCharacter);
+		}
+	}
+
+	// Keep foot-origin SK_GalloGato_Mesh grounded at capsule floor even after BP_GalloBlanco power-up scale/location resets
+	FVector RelLoc = MainMesh->GetRelativeLocation();
+	if (!FMath::IsNearlyEqual(RelLoc.Z, -95.0f, 0.5f))
+	{
+		RelLoc.Z = -95.0f;
+		MainMesh->SetRelativeLocation(RelLoc);
+	}
+	SyncRoosterCameraRigOffset(TargetActor, MainMesh, 95.0f);
+	MainMesh->bPauseAnims = false;
+
+	if (LastSyncedGalloGatoActor.Get() != TargetActor)
+	{
+		LastSyncedGalloGatoActor = TargetActor;
+		LastGalloGatoAnimState = -1;
+		LastGalloGatoStateTimer = 0.0f;
+	}
+
+	const bool bIsVictory = bForceVictory || ReadBpBoolProperty(TargetActor, FName(TEXT("bIsVictory")), false);
+	const bool bIsHitReacting = ReadBpBoolProperty(TargetActor, FName(TEXT("bIsHitReacting")), false);
+	const bool bIsAttacking = ReadBpBoolProperty(TargetActor, FName(TEXT("bIsAttacking")), false);
+	const bool bIsBlocking = ReadBpBoolProperty(TargetActor, FName(TEXT("bIsBlocking")), false);
+	const int32 BpAnimState = ReadBpIntProperty(TargetActor, FName(TEXT("CurrentAnimState")), 0);
+	const int32 ComboStep = ReadBpIntProperty(TargetActor, FName(TEXT("ComboStep")), 0);
+	const float StateTimer = ReadBpFloatProperty(TargetActor, FName(TEXT("StateTimer")), 0.0f);
+	const float ActorHealth = GetActorHealth(TargetActor);
+
+	int32 TargetStateKey = BpAnimState;
+	if (bIsVictory || BpAnimState == 8)
+	{
+		TargetStateKey = 8;
+	}
+	else if (ActorHealth <= 0.0f && CurrentScreenState == EPanFightersScreenState::InGame)
+	{
+		TargetStateKey = 12;
+	}
+	else if (bIsHitReacting && TargetStateKey != 7 && TargetStateKey != 9)
+	{
+		TargetStateKey = 7;
+	}
+	else if (bIsAttacking && (TargetStateKey < 4 || TargetStateKey > 6))
+	{
+		TargetStateKey = (ComboStep == 2) ? 5 : ((ComboStep == 3) ? 6 : 4);
+	}
+	else if (bIsBlocking && TargetStateKey != 3)
+	{
+		TargetStateKey = 3;
+	}
+
+	UAnimationAsset* CurrentAnim = GetActiveSingleNodeAnimAsset(MainMesh);
+	const bool bHasValidGalloGatoAnim = CurrentAnim && CurrentAnim->GetPathName().Contains(TEXT("/Game/Characters/GalloGato/Animations/"));
+	const bool bStateChanged = (TargetStateKey != LastGalloGatoAnimState);
+	const bool bLoopState = (TargetStateKey == 0 || TargetStateKey == 1 || TargetStateKey == 2 || TargetStateKey == 3 || TargetStateKey == 8);
+	const bool bOneShotRetriggered = (!bLoopState && StateTimer > LastGalloGatoStateTimer + 0.08f);
+
+	if (!bHasValidGalloGatoAnim || bStateChanged || bOneShotRetriggered)
+	{
+		const bool bAdvanceJab = (bStateChanged || bOneShotRetriggered);
+		const FRoosterAnimSpec Spec = ResolveGalloGatoAnimSpec(TargetStateKey, GalloGatoJabCounter, bAdvanceJab);
+		if (UAnimSequence* GalloAnim = Cast<UAnimSequence>(StaticLoadObject(UAnimSequence::StaticClass(), nullptr, Spec.AnimPath)))
+		{
+			PlayRoosterSingleNodeAnim(MainMesh, GalloAnim, Spec.bLoop);
+		}
+	}
+
+	LastGalloGatoAnimState = TargetStateKey;
+	LastGalloGatoStateTimer = StateTimer;
+}
+
 void APanFightersPlayerController::UpdatePreviewRoosterVisuals()
 {
 	AActor* Rooster = GetOrCreatePreviewRooster();
-	ApplyRoosterSkinMaterials(Rooster, SelectedCharacter);
+	ApplyRoosterAppearance(Rooster, SelectedCharacter);
+
+	if (USkeletalMeshComponent* MainMesh = ResolvePrimaryRoosterMesh(Rooster))
+	{
+		const TCHAR* IdleAnimPath = (SelectedCharacter == EPanFightersCharacter::GalloGato)
+			? TEXT("/Game/Characters/GalloGato/Animations/Anim_01_Idle_Guard.Anim_01_Idle_Guard")
+			: TEXT("/Game/Characters/GalloBlanco/Animations/Anim_01_Idle_Guard.Anim_01_Idle_Guard");
+		if (UAnimSequence* IdleAnim = Cast<UAnimSequence>(StaticLoadObject(UAnimSequence::StaticClass(), nullptr, IdleAnimPath)))
+		{
+			PlayRoosterSingleNodeAnim(MainMesh, IdleAnim, true);
+		}
+	}
 }
 
 void APanFightersPlayerController::RotatePreviewRooster(float DeltaYaw)
@@ -615,8 +1150,21 @@ void APanFightersPlayerController::ReturnToCharacterSelect()
 	SetScreenState(EPanFightersScreenState::CharacterSelect);
 }
 
+FText APanFightersPlayerController::GetWinnerCharacterName() const
+{
+	if (bLastMatchVictory)
+	{
+		return GetRoosterDisplayName(SelectedCharacter);
+	}
+	return GetRivalCharacterName();
+}
+
 void APanFightersPlayerController::ShowMatchResult(bool bVictory)
 {
+	if (!bVictory && !CachedRivalBodyMat)
+	{
+		CacheRivalAppearance(GetActiveRival());
+	}
 	bLastMatchVictory = bVictory;
 	SetScreenState(EPanFightersScreenState::MatchResult);
 }
@@ -684,10 +1232,11 @@ void APanFightersPlayerController::PlayerTick(float DeltaTime)
 			}
 		}
 
-		// 2. Read player health (normalized 0..100 for HUD) and detect hit
+		// 2. Sync GalloGato animations (if active), read player health (normalized 0..100 for HUD), and detect hit
 		APawn* MyPawn = GetPawn();
 		if (MyPawn)
 		{
+			SyncGalloGatoCombatAnimation(MyPawn);
 			CurrentPlayerHealth = GetActorNormalizedHealth(MyPawn, MaxPlayerHealth);
 			if (CurrentPlayerHealth < PreviousPlayerHealth - 0.01f)
 			{
@@ -702,37 +1251,52 @@ void APanFightersPlayerController::PlayerTick(float DeltaTime)
 		if (ActiveRival)
 		{
 			CurrentRivalHealth = GetActorNormalizedHealth(ActiveRival, MaxRivalHealth);
-		}
-
-		// 4. Prune completed/collected sky-drop beacons (each item only spawns once per match;
-		//    all 3 regenerate automatically when restarting or selecting a stage)
-		if (!bMatchResolved && CurrentStage != EPanFightersStage::None)
-		{
-			ActiveDropBeacons.RemoveAll([](const TWeakObjectPtr<APanFightersDropBeacon>& Ptr)
+			if (CurrentRivalHealth < PreviousRivalHealth - 0.01f)
 			{
-				return !Ptr.IsValid() || Ptr->IsActorBeingDestroyed() || !Ptr->HasActiveItem();
-			});
-		}
-
-		// 5. Check decisive match condition (knockout)
-		if (!bMatchResolved)
-		{
-			if (CurrentRivalHealth <= 0.0f)
-			{
-				MatchFinishTimer += DeltaTime;
-				if (MatchFinishTimer >= 0.85f)
+				if (!PunchHitSound)
 				{
-					bMatchResolved = true;
-					ShowMatchResult(true); // Player won!
+					PunchHitSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_Punch_Hit.SFX_Punch_Hit")));
 				}
+				if (!RoosterHurtSound)
+				{
+					RoosterHurtSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_Rooster_Hurt.SFX_Rooster_Hurt")));
+				}
+
+				PlaySFXAtLocation(PunchHitSound, ActiveRival->GetActorLocation(), 1.0f, FMath::RandRange(0.92f, 1.08f));
+				PlaySFXAtLocation(RoosterHurtSound, ActiveRival->GetActorLocation(), 0.95f, FMath::RandRange(0.90f, 1.10f));
 			}
-			else if (CurrentPlayerHealth <= 0.0f)
+			PreviousRivalHealth = CurrentRivalHealth;
+		}
+
+		// 4. Advance round transition countdown if waiting to start Round 2/3
+		if (bWaitingNextRound)
+		{
+			RoundTransitionTimer -= DeltaTime;
+			if (RoundTransitionTimer <= 0.0f)
 			{
+				bWaitingNextRound = false;
+				CurrentRound = FMath::Min(MaxMatchRounds, CurrentRound + 1);
+				StartRound(false);
+				return;
+			}
+		}
+
+		// 5. Prune completed/collected sky-drop beacons and replenish items continuously during active combat
+		if (!bMatchResolved && !bWaitingNextRound && CurrentStage != EPanFightersStage::None)
+		{
+			TryReplenishStagePowerUp(CurrentStage, DeltaTime);
+		}
+
+		// 6. Check round knockout condition (Best of 3 rounds: first to 2 wins takes the match)
+		if (!bMatchResolved && !bWaitingNextRound)
+		{
+			if (CurrentRivalHealth <= 0.0f || CurrentPlayerHealth <= 0.0f)
+			{
+				const bool bPlayerWonRound = (CurrentRivalHealth <= 0.0f);
 				MatchFinishTimer += DeltaTime;
 				if (MatchFinishTimer >= 0.85f)
 				{
-					bMatchResolved = true;
-					ShowMatchResult(false); // Player lost / NPC rooster won!
+					HandleRoundEnded(bPlayerWonRound);
 				}
 			}
 			else
@@ -740,6 +1304,14 @@ void APanFightersPlayerController::PlayerTick(float DeltaTime)
 				MatchFinishTimer = 0.0f;
 			}
 		}
+	}
+	else if (CurrentScreenState == EPanFightersScreenState::MatchResult && bLastMatchVictory && PreviewRoosterActor && IsValid(PreviewRoosterActor))
+	{
+		SyncGalloGatoCombatAnimation(PreviewRoosterActor, true);
+	}
+	else if (CurrentScreenState == EPanFightersScreenState::CharacterSelect && PreviewRoosterActor && IsValid(PreviewRoosterActor))
+	{
+		SyncGalloGatoCombatAnimation(PreviewRoosterActor, false);
 	}
 
 	// Smooth camera punch recoil decay
@@ -758,7 +1330,19 @@ void APanFightersPlayerController::TriggerPlayerHitReaction(float DamageAmount)
 		MasterMenuWidget->TriggerHitReaction(DamageAmount);
 	}
 
-	// 2. Camera punch impulse / head snap
+	// 2. Play punch impact and hurt vocalization for player
+	if (!PunchHitSound)
+	{
+		PunchHitSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_Punch_Hit.SFX_Punch_Hit")));
+	}
+	if (!RoosterHurtSound)
+	{
+		RoosterHurtSound = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/SFX/SFX_Rooster_Hurt.SFX_Rooster_Hurt")));
+	}
+	PlaySFX2D(PunchHitSound, 1.0f, FMath::RandRange(0.95f, 1.05f));
+	PlaySFX2D(RoosterHurtSound, 0.9f, FMath::RandRange(0.95f, 1.05f));
+
+	// 3. Camera punch impulse / head snap
 	PunchTraumaPitch = FMath::RandRange(1.2f, 2.2f);
 	PunchTraumaRoll = FMath::RandRange(-2.0f, 2.0f);
 	AddPitchInput(PunchTraumaPitch * 0.4f);
@@ -988,6 +1572,12 @@ void APanFightersPlayerController::ResetCharacterAndRivalStates()
 				PSC->DeactivateImmediate();
 			}
 		}
+
+		LastSyncedGalloGatoActor.Reset();
+		LastGalloGatoAnimState = -1;
+		LastGalloGatoStateTimer = 0.0f;
+		ApplyRoosterAppearance(MyPawn, SelectedCharacter);
+		SyncGalloGatoCombatAnimation(MyPawn, false);
 	}
 
 	// Reset EVERY rival rooster in the level so no stale state lingers when changing stages
@@ -1013,6 +1603,8 @@ void APanFightersPlayerController::ResetCharacterAndRivalStates()
 
 void APanFightersPlayerController::ClearStagePowerUps()
 {
+	SkyDropRespawnTimer = 0.0f;
+
 	for (const TWeakObjectPtr<APanFightersDropBeacon>& BeaconPtr : ActiveDropBeacons)
 	{
 		if (APanFightersDropBeacon* Beacon = BeaconPtr.Get())
@@ -1261,20 +1853,33 @@ void APanFightersPlayerController::SpawnSkyDropItem(EPanFightersStage Stage, AAc
 	}
 }
 
-void APanFightersPlayerController::RegenerateStagePowerUps(EPanFightersStage Stage)
+namespace
 {
-	ClearStagePowerUps();
-	SkyDropRespawnTimer = 0.0f;
-
-	if (Stage == EPanFightersStage::None)
+	struct FPowerUpDef
 	{
-		return;
+		const TCHAR* Path;
+		FLinearColor Color;
+	};
+
+	const TArray<FPowerUpDef>& GetStagePowerUpDefs()
+	{
+		static const TArray<FPowerUpDef> ItemDefs = {
+			{ TEXT("/Game/Items/PowerUps/BP_PowerUp_AjiChombo.BP_PowerUp_AjiChombo_C"), FLinearColor(1.0f, 0.25f, 0.06f, 1.0f) },
+			{ TEXT("/Game/Items/PowerUps/BP_PowerUp_PataconDorado.BP_PowerUp_PataconDorado_C"), FLinearColor(1.0f, 0.85f, 0.10f, 1.0f) },
+			{ TEXT("/Game/Items/PowerUps/BP_PowerUp_TazaCafe.BP_PowerUp_TazaCafe_C"), FLinearColor(0.20f, 0.88f, 1.0f, 1.0f) }
+		};
+		return ItemDefs;
 	}
+}
 
-	AActor* PlatformActor = FindStagePlatformActor(Stage);
-
+TArray<FVector> APanFightersPlayerController::BuildPowerUpAvoidPoints(EPanFightersStage Stage) const
+{
 	TArray<FVector> AvoidPoints;
-	if (AActor* PlayerStart = FindStagePlayerStart(Stage))
+	if (const APawn* MyPawn = GetPawn())
+	{
+		AvoidPoints.Add(MyPawn->GetActorLocation());
+	}
+	else if (AActor* PlayerStart = FindStagePlayerStart(Stage))
 	{
 		AvoidPoints.Add(PlayerStart->GetActorLocation());
 	}
@@ -1282,13 +1887,33 @@ void APanFightersPlayerController::RegenerateStagePowerUps(EPanFightersStage Sta
 	{
 		AvoidPoints.Add(Rival->GetActorLocation());
 	}
+	for (const TWeakObjectPtr<APanFightersDropBeacon>& BeaconPtr : ActiveDropBeacons)
+	{
+		if (const APanFightersDropBeacon* Beacon = BeaconPtr.Get())
+		{
+			if (IsValid(Beacon) && !Beacon->IsActorBeingDestroyed() && Beacon->HasActiveItem())
+			{
+				AvoidPoints.Add(Beacon->GetActorLocation());
+			}
+		}
+	}
+	return AvoidPoints;
+}
 
-	struct FPowerUpDef { const TCHAR* Path; FLinearColor Color; };
-	TArray<FPowerUpDef> ItemDefs = {
-		{ TEXT("/Game/Items/PowerUps/BP_PowerUp_AjiChombo.BP_PowerUp_AjiChombo_C"), FLinearColor(1.0f, 0.25f, 0.06f, 1.0f) },
-		{ TEXT("/Game/Items/PowerUps/BP_PowerUp_PataconDorado.BP_PowerUp_PataconDorado_C"), FLinearColor(1.0f, 0.85f, 0.10f, 1.0f) },
-		{ TEXT("/Game/Items/PowerUps/BP_PowerUp_TazaCafe.BP_PowerUp_TazaCafe_C"), FLinearColor(0.20f, 0.88f, 1.0f, 1.0f) }
-	};
+void APanFightersPlayerController::RegenerateStagePowerUps(EPanFightersStage Stage)
+{
+	ClearStagePowerUps();
+	SkyDropRespawnTimer = 0.0f;
+	NextSkyDropRespawnInterval = FMath::FRandRange(4.0f, 6.5f);
+
+	if (Stage == EPanFightersStage::None)
+	{
+		return;
+	}
+
+	AActor* PlatformActor = FindStagePlatformActor(Stage);
+	TArray<FVector> AvoidPoints = BuildPowerUpAvoidPoints(Stage);
+	TArray<FPowerUpDef> ItemDefs = GetStagePowerUpDefs();
 
 	// Shuffle item order so which item drops 1st, 2nd, and 3rd is random each match
 	for (int32 i = ItemDefs.Num() - 1; i > 0; --i)
@@ -1297,7 +1922,7 @@ void APanFightersPlayerController::RegenerateStagePowerUps(EPanFightersStage Sta
 		ItemDefs.Swap(i, j);
 	}
 
-	// Schedule each unique item to drop ONCE with brisk staggered timing suited to fast-paced fights
+	// Schedule each unique item with brisk staggered timing at match start
 	const float StaggeredDelays[3] = {
 		FMath::FRandRange(1.2f, 2.8f),
 		FMath::FRandRange(4.8f, 7.8f),
@@ -1311,6 +1936,76 @@ void APanFightersPlayerController::RegenerateStagePowerUps(EPanFightersStage Sta
 		{
 			SpawnSkyDropItem(Stage, PlatformActor, ItemClass, Def.Color, AvoidPoints, StaggeredDelays[Index]);
 		}
+	}
+}
+
+void APanFightersPlayerController::TryReplenishStagePowerUp(EPanFightersStage Stage, float DeltaTime)
+{
+	ActiveDropBeacons.RemoveAll([](const TWeakObjectPtr<APanFightersDropBeacon>& Ptr)
+	{
+		return !Ptr.IsValid() || Ptr->IsActorBeingDestroyed() || !Ptr->HasActiveItem();
+	});
+
+	const TArray<FPowerUpDef>& AllDefs = GetStagePowerUpDefs();
+	if (AllDefs.Num() == 0)
+	{
+		return;
+	}
+
+	// Cap concurrent active/pending drops on the arena to 3; replenish whenever an item is collected
+	if (ActiveDropBeacons.Num() >= AllDefs.Num())
+	{
+		SkyDropRespawnTimer = 0.0f;
+		return;
+	}
+
+	SkyDropRespawnTimer += DeltaTime;
+	if (SkyDropRespawnTimer < NextSkyDropRespawnInterval)
+	{
+		return;
+	}
+
+	SkyDropRespawnTimer = 0.0f;
+	NextSkyDropRespawnInterval = FMath::FRandRange(4.0f, 6.5f);
+
+	TSet<UClass*> ActiveClasses;
+	for (const TWeakObjectPtr<APanFightersDropBeacon>& BeaconPtr : ActiveDropBeacons)
+	{
+		if (const APanFightersDropBeacon* Beacon = BeaconPtr.Get())
+		{
+			if (const AActor* Item = Beacon->GetTrackedItem())
+			{
+				ActiveClasses.Add(Item->GetClass());
+			}
+		}
+	}
+
+	// Prefer power-up classes not currently present on the arena
+	TArray<const FPowerUpDef*> Candidates;
+	for (const FPowerUpDef& Def : AllDefs)
+	{
+		if (UClass* ItemClass = StaticLoadClass(AActor::StaticClass(), nullptr, Def.Path))
+		{
+			if (!ActiveClasses.Contains(ItemClass))
+			{
+				Candidates.Add(&Def);
+			}
+		}
+	}
+	if (Candidates.Num() == 0)
+	{
+		for (const FPowerUpDef& Def : AllDefs)
+		{
+			Candidates.Add(&Def);
+		}
+	}
+
+	const FPowerUpDef* ChosenDef = Candidates[FMath::RandRange(0, Candidates.Num() - 1)];
+	if (UClass* ChosenClass = StaticLoadClass(AActor::StaticClass(), nullptr, ChosenDef->Path))
+	{
+		AActor* PlatformActor = FindStagePlatformActor(Stage);
+		TArray<FVector> AvoidPoints = BuildPowerUpAvoidPoints(Stage);
+		SpawnSkyDropItem(Stage, PlatformActor, ChosenClass, ChosenDef->Color, AvoidPoints, 0.0f);
 	}
 }
 
@@ -1411,7 +2106,7 @@ bool APanFightersPlayerController::ShouldUseTouchControls() const
 	return SVirtualJoystick::ShouldDisplayTouchInterface() || bForceTouchControls;
 }
 
-void APanFightersPlayerController::SetupCharacterSelectScene()
+void APanFightersPlayerController::SetupRoosterShowcaseScene(bool bIsVictoryShowcase, bool bPlayerWon)
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -1594,18 +2289,55 @@ void APanFightersPlayerController::SetupCharacterSelectScene()
 			SpawnedRooster->SetActorLocation(FinalRoosterLoc);
 
 			PreviewRoosterActor = SpawnedRooster;
-			UpdatePreviewRoosterVisuals();
+			if (bIsVictoryShowcase && !bPlayerWon)
+			{
+				UMaterialInterface* RivalBody = CachedRivalBodyMat.Get();
+				if (!RivalBody)
+				{
+					RivalBody = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001")));
+				}
+				ApplyExplicitRoosterMaterials(SpawnedRooster, RivalBody, CachedRivalChestMat.Get());
+			}
+			else
+			{
+				UpdatePreviewRoosterVisuals();
+			}
+
+			if (bIsVictoryShowcase)
+			{
+				if (UFunction* VictoryFn = SpawnedRooster->FindFunction(FName(TEXT("TriggerVictory"))))
+				{
+					SpawnedRooster->ProcessEvent(VictoryFn, nullptr);
+				}
+
+				const TCHAR* VictoryAnimPath = (bPlayerWon && SelectedCharacter == EPanFightersCharacter::GalloGato)
+					? TEXT("/Game/Characters/GalloGato/Animations/Anim_11_Victory.Anim_11_Victory")
+					: TEXT("/Game/Characters/GalloBlanco/Animations/Anim_09_Victory.Anim_09_Victory");
+
+				if (UAnimSequence* VictoryAnim = Cast<UAnimSequence>(StaticLoadObject(UAnimSequence::StaticClass(), nullptr, VictoryAnimPath)))
+				{
+					if (USkeletalMeshComponent* MeshComp = ResolvePrimaryRoosterMesh(SpawnedRooster))
+					{
+						PlayRoosterSingleNodeAnim(MeshComp, VictoryAnim, true);
+					}
+				}
+			}
 		}
 	}
 
-	// 6. Camera Setup: Heroic view framing rooster and ring mat in full view on left-center
-	// Distance pulled back ~15%+ further (610 units) for an even cleaner full-body frame with plenty of room
+	// 6. Camera Setup: Heroic full-body view framing rooster and ring mat
+	// Character Select shifts slightly for right grid; Winner Showcase frames centered above bottom WINNER banner
 	const FVector ForwardDir = RoosterSpawnRot.Vector();
 	const FVector RightDir = FRotationMatrix(RoosterSpawnRot).GetScaledAxis(EAxis::Y);
 
-	const float CamDist = 610.0f;
-	const FVector CamLoc = MatLoc + ForwardDir * CamDist + RightDir * 50.0f + FVector(0.0f, 0.0f, 96.0f);
-	const FVector AimTarget = MatLoc + RightDir * (-30.0f) + FVector(0.0f, 0.0f, 65.0f);
+	const float CamDist = bIsVictoryShowcase ? 640.0f : 610.0f;
+	const FVector CamRightOffset = bIsVictoryShowcase ? FVector::ZeroVector : (RightDir * 50.0f);
+	const FVector AimRightOffset = bIsVictoryShowcase ? FVector::ZeroVector : (RightDir * (-30.0f));
+	const float CamHeightOffset = bIsVictoryShowcase ? 102.0f : 96.0f;
+	const float AimHeightOffset = bIsVictoryShowcase ? 62.0f : 65.0f;
+
+	const FVector CamLoc = MatLoc + ForwardDir * CamDist + CamRightOffset + FVector(0.0f, 0.0f, CamHeightOffset);
+	const FVector AimTarget = MatLoc + AimRightOffset + FVector(0.0f, 0.0f, AimHeightOffset);
 	const FRotator CamRot = (AimTarget - CamLoc).Rotation();
 
 	if (CharacterSelectCameraActor && IsValid(CharacterSelectCameraActor))

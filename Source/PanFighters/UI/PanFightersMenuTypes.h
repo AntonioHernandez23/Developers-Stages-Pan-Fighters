@@ -25,7 +25,8 @@ enum class EPanFightersCharacter : uint8
 	None,
 	PolloBlanco     UMETA(DisplayName = "Pollo Blanco"),
 	PolloChocolate  UMETA(DisplayName = "Pollo Chocolate"),
-	PolloAmarillo   UMETA(DisplayName = "Pollo Amarillo")
+	PolloAmarillo   UMETA(DisplayName = "Pollo Amarillo"),
+	GalloGato       UMETA(DisplayName = "Gallo Gato")
 };
 
 UENUM(BlueprintType)

@@ -25,6 +25,7 @@ UCLASS(abstract, config="Game")
 class PANFIGHTERS_API APanFightersPlayerController : public APlayerController
 {
 	GENERATED_BODY()
+	friend class FGalloGatoMechanicsTest;
 	
 public:
 
@@ -87,9 +88,29 @@ public:
 	/** Test Damage to rival trigger (Debug hotkey J) */
 	void TestDamageRivalAction();
 
-	/** Returns whether the last match ended in victory */
+	/** Returns whether the last match result was victory for player */
 	UFUNCTION(BlueprintPure, Category = "PanFighters|UI")
 	bool IsLastMatchVictory() const { return bLastMatchVictory; }
+
+	/** Returns current round number (1..3) */
+	UFUNCTION(BlueprintPure, Category = "PanFighters|Gameplay")
+	int32 GetCurrentRound() const { return CurrentRound; }
+
+	/** Returns rounds won by the player (0..2) */
+	UFUNCTION(BlueprintPure, Category = "PanFighters|Gameplay")
+	int32 GetPlayerRoundWins() const { return PlayerRoundWins; }
+
+	/** Returns rounds won by the rival (0..2) */
+	UFUNCTION(BlueprintPure, Category = "PanFighters|Gameplay")
+	int32 GetRivalRoundWins() const { return RivalRoundWins; }
+
+	/** Returns whether the current match ended after playing rounds (vs instant debug hotkey) */
+	UFUNCTION(BlueprintPure, Category = "PanFighters|Gameplay")
+	bool WasMatchCompletedByRounds() const { return bMatchCompletedNormally; }
+
+	/** Returns display name of the winning rooster for the MatchResult showcase */
+	UFUNCTION(BlueprintPure, Category = "PanFighters|UI")
+	FText GetWinnerCharacterName() const;
 
 	/** Returns current player health (0 to 100) */
 	UFUNCTION(BlueprintPure, Category = "PanFighters|Combat")
@@ -182,6 +203,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "PanFighters|Audio")
 	void StopBGM(float FadeTime = 0.8f);
 
+	/** Plays a 2D sound effect with volume and pitch modulation */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Audio")
+	void PlaySFX2D(USoundBase* SoundToPlay, float VolumeMultiplier = 1.0f, float PitchMultiplier = 1.0f);
+
+	/** Plays a 3D sound effect at a world location */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Audio")
+	void PlaySFXAtLocation(USoundBase* SoundToPlay, FVector Location, float VolumeMultiplier = 1.0f, float PitchMultiplier = 1.0f);
+
 protected:
 
 	/** Audio component for background music */
@@ -200,6 +229,22 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
 	TObjectPtr<USoundBase> FightMusic;
 
+	/** Music track for match victory */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> VictoryMusic;
+
+	/** Boxing bell sound effect (round start and pause) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> BoxingBellSound;
+
+	/** Punch hit sound effect (when attack connects) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> PunchHitSound;
+
+	/** Rooster hurt sound effect (emitted by player or rival on hit) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> RoosterHurtSound;
+
 	/** Dedicated close-up camera for character selection with Depth of Field */
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> CharacterSelectCameraActor;
@@ -212,10 +257,10 @@ protected:
 	UPROPERTY(Transient)
 	TArray<TWeakObjectPtr<AActor>> HiddenPowerupActors;
 
-	/** Sets up the close-up camera and ring mat for character select */
-	void SetupCharacterSelectScene();
+	/** Sets up the close-up camera, ring mat, and 3D rooster (Character Select or Winner Showcase) */
+	void SetupRoosterShowcaseScene(bool bIsVictoryShowcase, bool bPlayerWon);
 
-	/** Cleans up the character select scene props and camera */
+	/** Cleans up the character select / showcase scene props and camera */
 	void CleanupCharacterSelectScene();
 
 	/** Input Mapping Contexts */
@@ -268,6 +313,9 @@ protected:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Combat")
 	float CurrentRivalHealth = 100.0f;
 
+	/** Previous frame rival health (0 to 100) for hit detection */
+	float PreviousRivalHealth = 100.0f;
+
 	/** Internal maximum health for player (visual bars remain 0 to 100) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Combat")
 	float MaxPlayerHealth = 350.0f;
@@ -287,14 +335,58 @@ protected:
 	/** Active sky-drop beacons spawned for the current stage */
 	TArray<TWeakObjectPtr<APanFightersDropBeacon>> ActiveDropBeacons;
 
-	/** Timer used to replenish sky-drop items if collected mid-match */
+	/** Timer used to replenish sky-drop items mid-match */
 	float SkyDropRespawnTimer = 0.0f;
 
-	/** Timer after match decisive hit before popup appears */
+	/** Randomized delay (seconds) before spawning a replacement sky drop when below the arena cap */
+	float NextSkyDropRespawnInterval = 5.0f;
+
+	/** Cached initial transforms for each stage's rival across rounds and retries */
+	TMap<EPanFightersStage, FTransform> CachedStageRivalSpawns;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> CachedRivalBodyMat;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> CachedRivalChestMat;
+
+	/** Best-of-3 match round tracking (first rooster to win 2 rounds wins the match) */
+	static constexpr int32 RoundsToWinMatch = 2;
+	static constexpr int32 MaxMatchRounds = 3;
+
+	int32 CurrentRound = 1;
+	int32 PlayerRoundWins = 0;
+	int32 RivalRoundWins = 0;
+	bool bWaitingNextRound = false;
+	float RoundTransitionTimer = 0.0f;
+	bool bMatchCompletedNormally = false;
+
+	/** Timer after match/round decisive hit before round transition or result screen */
 	float MatchFinishTimer = 0.0f;
 
 	/** Flag to prevent multiple win/loss triggers */
 	bool bMatchResolved = false;
+
+	/** Initializes/resets fighters and items to begin the current round */
+	void StartRound(bool bInitialStageEntry);
+
+	/** Resolves a round knockout (advances to next round or finishes Best-of-3 match) */
+	void HandleRoundEnded(bool bPlayerWonRound);
+
+	/** Snapshots body & chest materials from the stage rival actor for the Winner showcase */
+	void CacheRivalAppearance(AActor* RivalActor);
+
+	/** Applies selected character's SkeletalMesh, mesh pivot offset, and materials (handles GalloGato + Pollo skins) */
+	void ApplyRoosterAppearance(AActor* RoosterActor, EPanFightersCharacter InCharacter);
+
+	/** Synchronizes custom character animations & floor pivot with BP_GalloBlanco combat/showcase state */
+	void SyncGalloGatoCombatAnimation(AActor* TargetActor, bool bForceVictory = false);
+
+	/** Tracks last synced combat state so looping/one-shot animations transition reliably without restarting */
+	TWeakObjectPtr<AActor> LastSyncedGalloGatoActor;
+	int32 LastGalloGatoAnimState = -1;
+	float LastGalloGatoStateTimer = 0.0f;
+	int32 GalloGatoJabCounter = 0;
 
 	/** Camera punch recoil trauma */
 	float PunchTraumaPitch = 0.0f;
@@ -331,6 +423,12 @@ protected:
 
 	/** Regenerates sky-falling PowerUps strictly within the target stage's playable platform */
 	void RegenerateStagePowerUps(EPanFightersStage Stage);
+
+	/** Prunes collected sky drops and spawns replacement items continuously during active combat */
+	void TryReplenishStagePowerUp(EPanFightersStage Stage, float DeltaTime);
+
+	/** Collects locations to avoid when picking a landing point (player, rival, and active beacons) */
+	TArray<FVector> BuildPowerUpAvoidPoints(EPanFightersStage Stage) const;
 
 	/** Spawns one PowerUp from the sky with a visual landing indicator on the target platform */
 	void SpawnSkyDropItem(EPanFightersStage Stage, AActor* PlatformActor, UClass* PowerUpClass, const FLinearColor& BeaconColor, TArray<FVector>& InOutUsedPoints, float SpawnDelaySeconds = 0.0f);
