@@ -14,11 +14,131 @@
 #include "Widgets/Notifications/SProgressBar.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBackgroundBlur.h"
+#include "Widgets/Layout/SScaleBox.h"
 #include "Styling/CoreStyle.h"
 #include "Styling/SlateBrush.h"
+#include "Brushes/SlateImageBrush.h"
 #include "ImageUtils.h"
 #include "Misc/Paths.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Kismet/GameplayStatics.h"
+#include "Components/AudioComponent.h"
+#include "Engine/Engine.h"
+#include "Engine/Texture2D.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundClass.h"
+#include "Sound/SoundMix.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectIterator.h"
+
+namespace PanFightersAudio
+{
+	static void LoadVolumes(float& OutMaster, float& OutMusic, float& OutSFX)
+	{
+		if (GConfig)
+		{
+			GConfig->GetFloat(TEXT("PanFighters.Audio"), TEXT("MasterVolume"), OutMaster, GGameUserSettingsIni);
+			GConfig->GetFloat(TEXT("PanFighters.Audio"), TEXT("MusicVolume"), OutMusic, GGameUserSettingsIni);
+			GConfig->GetFloat(TEXT("PanFighters.Audio"), TEXT("SFXVolume"), OutSFX, GGameUserSettingsIni);
+			OutMaster = FMath::Clamp(OutMaster, 0.0f, 1.0f);
+			OutMusic = FMath::Clamp(OutMusic, 0.0f, 1.0f);
+			OutSFX = FMath::Clamp(OutSFX, 0.0f, 1.0f);
+		}
+	}
+
+	static void SaveVolumes(float MasterVol, float MusicVol, float SFXVol)
+	{
+		if (GConfig)
+		{
+			GConfig->SetFloat(TEXT("PanFighters.Audio"), TEXT("MasterVolume"), FMath::Clamp(MasterVol, 0.0f, 1.0f), GGameUserSettingsIni);
+			GConfig->SetFloat(TEXT("PanFighters.Audio"), TEXT("MusicVolume"), FMath::Clamp(MusicVol, 0.0f, 1.0f), GGameUserSettingsIni);
+			GConfig->SetFloat(TEXT("PanFighters.Audio"), TEXT("SFXVolume"), FMath::Clamp(SFXVol, 0.0f, 1.0f), GGameUserSettingsIni);
+			GConfig->Flush(false, GGameUserSettingsIni);
+		}
+	}
+
+	static USoundMix* GetOrCreateTransientMix(TWeakObjectPtr<USoundMix>& CacheSlot)
+	{
+		if (!CacheSlot.IsValid())
+		{
+			USoundMix* NewMix = NewObject<USoundMix>(GetTransientPackage(), NAME_None, RF_Transient);
+			NewMix->AddToRoot();
+			CacheSlot = NewMix;
+		}
+		return CacheSlot.Get();
+	}
+
+	static void ApplyVolumes(UWorld* World, float MasterVol, float MusicVol, float SFXVol)
+	{
+		MasterVol = FMath::Clamp(MasterVol, 0.0f, 1.0f);
+		MusicVol = FMath::Clamp(MusicVol, 0.0f, 1.0f);
+		SFXVol = FMath::Clamp(SFXVol, 0.0f, 1.0f);
+
+		if (World)
+		{
+			static TWeakObjectPtr<USoundMix> MasterMixCache;
+			static TWeakObjectPtr<USoundMix> SFXMixCache;
+			static TWeakObjectPtr<UWorld> LastPushedWorld;
+
+			USoundMix* MasterMix = GetOrCreateTransientMix(MasterMixCache);
+			USoundMix* SFXMix = GetOrCreateTransientMix(SFXMixCache);
+
+			if (LastPushedWorld.Get() != World)
+			{
+				UGameplayStatics::PushSoundMixModifier(World, MasterMix);
+				UGameplayStatics::PushSoundMixModifier(World, SFXMix);
+				LastPushedWorld = World;
+			}
+
+			if (USoundClass* MasterClass = LoadObject<USoundClass>(nullptr, TEXT("/Engine/EngineSounds/Master.Master")))
+			{
+				UGameplayStatics::SetSoundMixClassOverride(World, MasterMix, MasterClass, MasterVol, 1.0f, 0.01f, true);
+			}
+			if (USoundClass* SFXClass = LoadObject<USoundClass>(nullptr, TEXT("/Engine/EngineSounds/SFX.SFX")))
+			{
+				UGameplayStatics::SetSoundMixClassOverride(World, SFXMix, SFXClass, SFXVol, 1.0f, 0.01f, true);
+			}
+			if (USoundClass* VoiceClass = LoadObject<USoundClass>(nullptr, TEXT("/Engine/EngineSounds/Voice.Voice")))
+			{
+				UGameplayStatics::SetSoundMixClassOverride(World, SFXMix, VoiceClass, SFXVol, 1.0f, 0.01f, true);
+			}
+		}
+
+		for (TObjectIterator<UAudioComponent> It; It; ++It)
+		{
+			UAudioComponent* AudioComp = *It;
+			if (!AudioComp || !IsValid(AudioComp))
+			{
+				continue;
+			}
+			if (World && AudioComp->GetWorld() != World)
+			{
+				continue;
+			}
+
+			const USoundBase* SoundAsset = AudioComp->Sound.Get();
+			const FString SoundName = SoundAsset ? SoundAsset->GetName() : FString();
+			const bool bIsMusic = AudioComp->bIsUISound && (SoundName.StartsWith(TEXT("Mus_")) || SoundName.Contains(TEXT("at-war")));
+			if (bIsMusic)
+			{
+				AudioComp->SetVolumeMultiplier(MusicVol);
+				if (MusicVol > KINDA_SMALL_NUMBER && !AudioComp->IsPlaying())
+				{
+					AudioComp->Play();
+				}
+			}
+			else if (SoundAsset)
+			{
+				const USoundClass* SC = SoundAsset->GetSoundClass();
+				if (!SC || SC->GetName() == TEXT("Master"))
+				{
+					AudioComp->SetVolumeMultiplier(SFXVol);
+				}
+			}
+		}
+	}
+}
 
 void SPanFightersMasterWidget::Construct(const FArguments& InArgs)
 {
@@ -27,6 +147,10 @@ void SPanFightersMasterWidget::Construct(const FArguments& InArgs)
 	SplashElapsedTime = 0.0f;
 	SplashProgress = 0.0f;
 	bSplashFinished = false;
+
+	// Restore and apply persisted audio settings at startup
+	PanFightersAudio::LoadVolumes(MasterVolume, MusicVolume, SFXVolume);
+	PanFightersAudio::ApplyVolumes(OwnerPC.IsValid() ? OwnerPC->GetWorld() : nullptr, MasterVolume, MusicVolume, SFXVolume);
 
 	// Load preview images for each stage
 	LoadStageImages();
@@ -175,6 +299,8 @@ void SPanFightersMasterWidget::LoadStageImages()
 	BrushCardBg = LoadImageBrush(UIContentDir / TEXT("T_CardBackground.png"), FVector2D(280.0f, 110.0f));
 	BrushGridBg = LoadImageBrush(UIContentDir / TEXT("T_GridBackground.png"), FVector2D(450.0f, 430.0f));
 	BrushSlotLocked = LoadImageBrush(UIContentDir / TEXT("T_SlotLocked.png"), FVector2D(120.0f, 120.0f));
+	BrushNavButton = LoadImageBrush(UIContentDir / TEXT("T_BotonMaderaNav.png"), FVector2D(240.0f, 52.0f));
+	BrushMainMenuBg = LoadImageBrush(UIContentDir / TEXT("T_MainMenuBg.jpg"), FVector2D(1024.0f, 572.0f));
 }
 
 void SPanFightersMasterWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
@@ -371,13 +497,13 @@ void SPanFightersMasterWidget::SetScreenState(EPanFightersScreenState NewState)
 		break;
 
 	case EPanFightersScreenState::MainMenu:
-		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor(0.05f, 0.04f, 0.035f, 0.96f));
+		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor::Transparent);
 		ScreenContentContainer->SetVisibility(EVisibility::Visible);
 		ScreenContentContainer->SetContent(BuildMainMenu());
 		break;
 
 	case EPanFightersScreenState::OptionsMenu:
-		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor(0.05f, 0.04f, 0.035f, 0.96f));
+		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor::Transparent);
 		ScreenContentContainer->SetVisibility(EVisibility::Visible);
 		ScreenContentContainer->SetContent(BuildOptionsMenu());
 		break;
@@ -567,75 +693,165 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildSplashScreen()
 // --------------------------------------------------------------------------
 TSharedRef<SWidget> SPanFightersMasterWidget::BuildMainMenu()
 {
-	return SNew(SOverlay)
-
-	+ SOverlay::Slot()
-	.HAlign(HAlign_Center)
-	.VAlign(VAlign_Center)
+	return SNew(SScaleBox)
+	.Stretch(EStretch::ScaleToFit)
 	[
-		SNew(SVerticalBox)
-
-		// Title
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 0.0f, 0.0f, 22.0f)
+		SNew(SBox)
+		.WidthOverride(1920.0f)
+		.HeightOverride(1080.0f)
 		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("PAN FIGHTERS")))
-			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 46))
-			.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.82f, 0.35f, 1.0f)))
-		]
+			SNew(SOverlay)
 
-		// OPTION 1: JUGAR
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 0.0f, 0.0f, 14.0f)
-		[
-			BuildMenuButton(
-				FText::FromString(TEXT("JUGAR")),
-				FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnPlayClicked),
-				FLinearColor(0.95f, 0.68f, 0.15f, 1.0f)
-			)
-		]
+			// 1. FULLSCREEN KEY ART (contains 3D title logo embedded in top center)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			[
+				SNew(SImage)
+				.Image(BrushMainMenuBg.IsValid() ? BrushMainMenuBg.Get() : (BrushSplash.IsValid() ? BrushSplash.Get() : FCoreStyle::Get().GetBrush("WhiteBrush")))
+			]
 
-		// OPTION 2: OPCIONES
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 0.0f, 0.0f, 14.0f)
-		[
-			BuildMenuButton(
-				FText::FromString(TEXT("OPCIONES")),
-				FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnOptionsClicked),
-				FLinearColor(0.80f, 0.52f, 0.22f, 1.0f)
-			)
-		]
+			// 2. REORGANIZED MENU BUTTONS (Lower-left stack, leaving art, roosters, and logo completely clear!)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Left)
+			.VAlign(VAlign_Bottom)
+			.Padding(110.0f, 0.0f, 0.0f, 95.0f)
+			[
+				SNew(SVerticalBox)
 
-		// OPTION 3: SALIR
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 0.0f, 0.0f, 20.0f)
-		[
-			BuildMenuButton(
-				FText::FromString(TEXT("SALIR")),
-				FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnQuitClicked),
-				FLinearColor(0.70f, 0.25f, 0.20f, 1.0f)
-			)
-		]
+				// OPTION 1: JUGAR
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 16.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(290.0f)
+					.HeightOverride(64.0f)
+					[
+						SNew(SButton)
+						.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+						.ContentPadding(FMargin(0.0f))
+						.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnPlayClicked))
+						[
+							SNew(SOverlay)
 
-		// Footer
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 15.0f, 0.0f, 0.0f)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Pan Fighters © 2026 • Desarrollado con Unreal Engine 5")))
-			.Font(FCoreStyle::GetDefaultFontStyle("Italic", 11))
-			.ColorAndOpacity(FSlateColor(FLinearColor(0.55f, 0.50f, 0.45f, 0.75f)))
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Fill)
+							.VAlign(VAlign_Fill)
+							[
+								SNew(SImage)
+								.Image(BrushNavButton.IsValid() ? BrushNavButton.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+								.ColorAndOpacity(BrushNavButton.IsValid() ? FLinearColor::White : FLinearColor(0.95f, 0.65f, 0.15f, 1.0f))
+							]
+
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Center)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(FText::FromString(TEXT("▶  JUGAR")))
+								.Font(FCoreStyle::GetDefaultFontStyle("Bold", 17))
+								.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.94f, 0.72f, 1.0f)))
+								.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.9f))
+								.ShadowOffset(FVector2D(1.5f, 1.5f))
+							]
+						]
+					]
+				]
+
+				// OPTION 2: OPCIONES
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 16.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(290.0f)
+					.HeightOverride(64.0f)
+					[
+						SNew(SButton)
+						.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+						.ContentPadding(FMargin(0.0f))
+						.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnOptionsClicked))
+						[
+							SNew(SOverlay)
+
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Fill)
+							.VAlign(VAlign_Fill)
+							[
+								SNew(SImage)
+								.Image(BrushNavButton.IsValid() ? BrushNavButton.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+								.ColorAndOpacity(BrushNavButton.IsValid() ? FLinearColor::White : FLinearColor(0.75f, 0.50f, 0.20f, 1.0f))
+							]
+
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Center)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(FText::FromString(TEXT("⚙  OPCIONES")))
+								.Font(FCoreStyle::GetDefaultFontStyle("Bold", 16))
+								.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.90f, 0.68f, 1.0f)))
+								.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.9f))
+								.ShadowOffset(FVector2D(1.5f, 1.5f))
+							]
+						]
+					]
+				]
+
+				// OPTION 3: SALIR
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 20.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(290.0f)
+					.HeightOverride(64.0f)
+					[
+						SNew(SButton)
+						.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+						.ContentPadding(FMargin(0.0f))
+						.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnQuitClicked))
+						[
+							SNew(SOverlay)
+
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Fill)
+							.VAlign(VAlign_Fill)
+							[
+								SNew(SImage)
+								.Image(BrushNavButton.IsValid() ? BrushNavButton.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+								.ColorAndOpacity(BrushNavButton.IsValid() ? FLinearColor::White : FLinearColor(0.65f, 0.22f, 0.18f, 1.0f))
+							]
+
+							+ SOverlay::Slot()
+							.HAlign(HAlign_Center)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(FText::FromString(TEXT("✕  SALIR")))
+								.Font(FCoreStyle::GetDefaultFontStyle("Bold", 16))
+								.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.85f, 0.80f, 1.0f)))
+								.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.9f))
+								.ShadowOffset(FVector2D(1.5f, 1.5f))
+							]
+						]
+					]
+				]
+
+				// Footer
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Pan Fighters © 2026 • Unreal Engine 5")))
+					.Font(FCoreStyle::GetDefaultFontStyle("Italic", 12))
+					.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.95f, 0.85f, 0.75f)))
+					.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.85f))
+					.ShadowOffset(FVector2D(1.0f, 1.0f))
+				]
+			]
 		]
 	];
 }
@@ -645,7 +861,169 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildMainMenu()
 // --------------------------------------------------------------------------
 TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 {
+	PanFightersAudio::LoadVolumes(MasterVolume, MusicVolume, SFXVolume);
+	TWeakPtr<SPanFightersMasterWidget> WeakSelf = StaticCastSharedRef<SPanFightersMasterWidget>(AsShared());
+
+	auto ApplyAndSaveAudio = [WeakSelf]()
+	{
+		if (TSharedPtr<SPanFightersMasterWidget> Pinned = WeakSelf.Pin())
+		{
+			UWorld* World = Pinned->OwnerPC.IsValid() ? Pinned->OwnerPC->GetWorld() : nullptr;
+			PanFightersAudio::ApplyVolumes(World, Pinned->MasterVolume, Pinned->MusicVolume, Pinned->SFXVolume);
+			PanFightersAudio::SaveVolumes(Pinned->MasterVolume, Pinned->MusicVolume, Pinned->SFXVolume);
+		}
+	};
+
+	auto MakeVolumeRow = [WeakSelf, ApplyAndSaveAudio](const TCHAR* LabelText, float SPanFightersMasterWidget::* VolumeMember) -> TSharedRef<SWidget>
+	{
+		return SNew(SHorizontalBox)
+
+		+ SHorizontalBox::Slot()
+		.FillWidth(0.38f)
+		.VAlign(VAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(LabelText))
+			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 13))
+			.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.90f, 0.85f, 1.0f)))
+		]
+
+		+ SHorizontalBox::Slot()
+		.FillWidth(0.62f)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SHorizontalBox)
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(34.0f)
+				.HeightOverride(30.0f)
+				[
+					SNew(SButton)
+					.ButtonStyle(&FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
+					.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.28f, 0.20f, 0.14f, 1.0f)))
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
+					.OnClicked_Lambda([WeakSelf, VolumeMember, ApplyAndSaveAudio]()
+					{
+						if (TSharedPtr<SPanFightersMasterWidget> Pinned = WeakSelf.Pin())
+						{
+							float& Vol = Pinned.Get()->*VolumeMember;
+							Vol = FMath::Clamp(FMath::RoundToFloat((Vol - 0.10f) * 20.0f) / 20.0f, 0.0f, 1.0f);
+							ApplyAndSaveAudio();
+						}
+						return FReply::Handled();
+					})
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("-")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+						.ColorAndOpacity(FSlateColor(FLinearColor::White))
+					]
+				]
+			]
+
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.VAlign(VAlign_Center)
+			.Padding(8.0f, 0.0f)
+			[
+				SNew(SSlider)
+				.StepSize(0.05f)
+				.Value_Lambda([WeakSelf, VolumeMember]()
+				{
+					if (TSharedPtr<SPanFightersMasterWidget> Pinned = WeakSelf.Pin())
+					{
+						return Pinned.Get()->*VolumeMember;
+					}
+					return 1.0f;
+				})
+				.OnValueChanged_Lambda([WeakSelf, VolumeMember, ApplyAndSaveAudio](float Val)
+				{
+					if (TSharedPtr<SPanFightersMasterWidget> Pinned = WeakSelf.Pin())
+					{
+						Pinned.Get()->*VolumeMember = FMath::Clamp(Val, 0.0f, 1.0f);
+						ApplyAndSaveAudio();
+					}
+				})
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(34.0f)
+				.HeightOverride(30.0f)
+				[
+					SNew(SButton)
+					.ButtonStyle(&FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
+					.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.75f, 0.50f, 0.16f, 1.0f)))
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
+					.OnClicked_Lambda([WeakSelf, VolumeMember, ApplyAndSaveAudio]()
+					{
+						if (TSharedPtr<SPanFightersMasterWidget> Pinned = WeakSelf.Pin())
+						{
+							float& Vol = Pinned.Get()->*VolumeMember;
+							Vol = FMath::Clamp(FMath::RoundToFloat((Vol + 0.10f) * 20.0f) / 20.0f, 0.0f, 1.0f);
+							ApplyAndSaveAudio();
+						}
+						return FReply::Handled();
+					})
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("+")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+						.ColorAndOpacity(FSlateColor(FLinearColor::White))
+					]
+				]
+			]
+
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(48.0f)
+				.HAlign(HAlign_Right)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([WeakSelf, VolumeMember]()
+					{
+						const float Vol = WeakSelf.IsValid() ? (WeakSelf.Pin().Get()->*VolumeMember) : 1.0f;
+						return FText::FromString(FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Vol * 100.0f)));
+					})
+					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+					.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.80f, 0.35f, 1.0f)))
+				]
+			]
+		];
+	};
+
 	return SNew(SOverlay)
+
+	// Background cover with dark overlay for readability
+	+ SOverlay::Slot()
+	.HAlign(HAlign_Fill)
+	.VAlign(VAlign_Fill)
+	[
+		SNew(SImage)
+		.Image(BrushMainMenuBg.IsValid() ? BrushMainMenuBg.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+	]
+
+	+ SOverlay::Slot()
+	.HAlign(HAlign_Fill)
+	.VAlign(VAlign_Fill)
+	[
+		SNew(SBorder)
+		.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+		.BorderBackgroundColor(FLinearColor(0.04f, 0.035f, 0.03f, 0.88f))
+	]
 
 	+ SOverlay::Slot()
 	.HAlign(HAlign_Center)
@@ -682,7 +1060,7 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 		.Padding(0.0f, 12.0f, 0.0f, 24.0f)
 		[
 			SNew(SBox)
-			.WidthOverride(480.0f)
+			.WidthOverride(560.0f)
 			.HeightOverride(2.0f)
 			[
 				SNew(SBorder)
@@ -697,7 +1075,7 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 		.HAlign(HAlign_Center)
 		[
 			SNew(SBox)
-			.WidthOverride(520.0f)
+			.WidthOverride(620.0f)
 			[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
@@ -711,26 +1089,7 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 					.AutoHeight()
 					.Padding(0.0f, 0.0f, 0.0f, 16.0f)
 					[
-						SNew(SHorizontalBox)
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.45f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(FText::FromString(TEXT("Volumen Maestro:")))
-							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 13))
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.90f, 0.85f, 1.0f)))
-						]
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.55f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SSlider)
-							.Value(MasterVolume)
-							.OnValueChanged_Lambda([this](float Val) { MasterVolume = Val; })
-						]
+						MakeVolumeRow(TEXT("Volumen Maestro:"), &SPanFightersMasterWidget::MasterVolume)
 					]
 
 					// Row 2: Volumen de Música
@@ -738,26 +1097,7 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 					.AutoHeight()
 					.Padding(0.0f, 0.0f, 0.0f, 16.0f)
 					[
-						SNew(SHorizontalBox)
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.45f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(FText::FromString(TEXT("Volumen Música:")))
-							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 13))
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.90f, 0.85f, 1.0f)))
-						]
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.55f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SSlider)
-							.Value(MusicVolume)
-							.OnValueChanged_Lambda([this](float Val) { MusicVolume = Val; })
-						]
+						MakeVolumeRow(TEXT("Volumen Música:"), &SPanFightersMasterWidget::MusicVolume)
 					]
 
 					// Row 3: Volumen de Efectos SFX
@@ -765,26 +1105,7 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 					.AutoHeight()
 					.Padding(0.0f, 0.0f, 0.0f, 16.0f)
 					[
-						SNew(SHorizontalBox)
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.45f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(STextBlock)
-							.Text(FText::FromString(TEXT("Efectos Sonoros (SFX):")))
-							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 13))
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.90f, 0.85f, 1.0f)))
-						]
-
-						+ SHorizontalBox::Slot()
-						.FillWidth(0.55f)
-						.VAlign(VAlign_Center)
-						[
-							SNew(SSlider)
-							.Value(SFXVolume)
-							.OnValueChanged_Lambda([this](float Val) { SFXVolume = Val; })
-						]
+						MakeVolumeRow(TEXT("Efectos Sonoros (SFX):"), &SPanFightersMasterWidget::SFXVolume)
 					]
 
 					// Row 4: Calidad Gráfica
@@ -847,8 +1168,6 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 }
 
 // --------------------------------------------------------------------------
-// CHARACTER SELECT MENU BUILDER (Catálogo de 3 Gallos Boxeadores)
-// --------------------------------------------------------------------------
 // CHARACTER SELECT HELPERS & 3D ARCADE FIGHTER GRID (Matching reference image)
 // --------------------------------------------------------------------------
 FText SPanFightersMasterWidget::GetSelectedCharacterCardName() const
@@ -894,7 +1213,7 @@ FSlateColor SPanFightersMasterWidget::GetSelectedSlotBorderColor(EPanFightersCha
 	{
 		return FSlateColor(FLinearColor(1.0f, 0.88f, 0.22f, 1.0f));
 	}
-	return FSlateColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+	return FSlateColor(FLinearColor(0.22f, 0.17f, 0.12f, 0.85f));
 }
 
 FReply SPanFightersMasterWidget::OnCharacterSlotClicked(EPanFightersCharacter InChar)
@@ -1064,48 +1383,39 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterGridSlot(
 			.ContentPadding(FMargin(0.0f))
 			.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnCharacterSlotClicked, CharId))
 			[
-				SNew(SOverlay)
-
-				// 1. 3D Character Portrait
-				+ SOverlay::Slot()
-				.HAlign(HAlign_Fill)
-				.VAlign(VAlign_Fill)
-				.Padding(4.0f)
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor_Raw(this, &SPanFightersMasterWidget::GetSelectedSlotBorderColor, CharId)
+				.Padding(FMargin(3.0f))
 				[
-					AvatarBrush.IsValid()
-					? SNew(SImage).Image(AvatarBrush.Get())
-					: SNew(SImage).Image(FCoreStyle::Get().GetBrush("WhiteBrush")).ColorAndOpacity(FSlateColor(FLinearColor(0.15f, 0.12f, 0.10f, 1.0f)))
-				]
+					SNew(SOverlay)
 
-				// 2. Clean Top Name Tag (ONLY the character name)
-				+ SOverlay::Slot()
-				.HAlign(HAlign_Center)
-				.VAlign(VAlign_Top)
-				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
-				[
-					SNew(SBorder)
-					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(FLinearColor(0.06f, 0.04f, 0.03f, 0.88f))
-					.Padding(FMargin(8.0f, 2.5f))
+					// 1. 3D Character Portrait
+					+ SOverlay::Slot()
+					.HAlign(HAlign_Fill)
+					.VAlign(VAlign_Fill)
 					[
-						SNew(STextBlock)
-						.Text(SlotName)
-						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 8))
-						.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.95f, 0.90f, 1.0f)))
+						AvatarBrush.IsValid()
+						? SNew(SImage).Image(AvatarBrush.Get())
+						: SNew(SImage).Image(FCoreStyle::Get().GetBrush("WhiteBrush")).ColorAndOpacity(FSlateColor(FLinearColor(0.15f, 0.12f, 0.10f, 1.0f)))
 					]
-				]
 
-				// 3. Glowing Yellow/Golden contour when selected!
-				+ SOverlay::Slot()
-				.HAlign(HAlign_Fill)
-				.VAlign(VAlign_Fill)
-				[
-					SNew(SBorder)
-					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-					.BorderBackgroundColor_Raw(this, &SPanFightersMasterWidget::GetSelectedSlotBorderColor, CharId)
-					.Padding(FMargin(3.5f))
+					// 2. Clean Top Name Tag (ONLY the character name)
+					+ SOverlay::Slot()
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Top)
+					.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 					[
-						SNullWidget::NullWidget
+						SNew(SBorder)
+						.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+						.BorderBackgroundColor(FLinearColor(0.06f, 0.04f, 0.03f, 0.88f))
+						.Padding(FMargin(8.0f, 2.5f))
+						[
+							SNew(STextBlock)
+							.Text(SlotName)
+							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 8))
+							.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.95f, 0.90f, 1.0f)))
+						]
 					]
 				]
 			]
@@ -1114,140 +1424,235 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterGridSlot(
 
 TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterSelectMenu()
 {
-	return SNew(SOverlay)
-
-	// TOP TITLE BANNER (Rustic dark wood panel with bronze border, rivets, and warm golden stylized text)
-	+ SOverlay::Slot()
+	return SNew(SScaleBox)
+	.Stretch(EStretch::ScaleToFit)
 	.HAlign(HAlign_Center)
-	.VAlign(VAlign_Top)
-	.Padding(0.0f, 22.0f, 0.0f, 0.0f)
-	[
-		SNew(SBox)
-		.WidthOverride(500.0f)
-		.HeightOverride(90.0f)
-		[
-			SNew(SImage)
-			.Image(BrushTitleBanner.IsValid() ? BrushTitleBanner.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
-		]
-	]
-
-	// TOP-LEFT CARD: Character Information Card (No '1P', no ribbons, bold white font)
-	+ SOverlay::Slot()
-	.HAlign(HAlign_Left)
-	.VAlign(VAlign_Top)
-	.Padding(44.0f, 36.0f, 0.0f, 0.0f)
-	[
-		BuildCharacterInfoCard()
-	]
-
-	// RIGHT SIDE: Elegant 3x3 Fighter Grid Board (Dark leather/wood, stitching, golden rounded frame with rivets)
-	+ SOverlay::Slot()
-	.HAlign(HAlign_Right)
 	.VAlign(VAlign_Center)
-	.Padding(0.0f, 25.0f, 48.0f, 0.0f)
 	[
 		SNew(SBox)
-		.WidthOverride(445.0f)
-		.HeightOverride(430.0f)
+		.WidthOverride(1920.0f)
+		.HeightOverride(1080.0f)
 		[
 			SNew(SOverlay)
 
-			// Board Background Texture
-			+ SOverlay::Slot()
-			.HAlign(HAlign_Fill)
-			.VAlign(VAlign_Fill)
-			[
-				SNew(SImage)
-				.Image(BrushGridBg.IsValid() ? BrushGridBg.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
-			]
-
-			// 3x3 Slots Inner Container
+			// TOP TITLE BANNER (Rustic dark wood panel with bronze border, rivets, and warm golden stylized text)
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			.Padding(20.0f, 20.0f, 20.0f, 20.0f)
+			.VAlign(VAlign_Top)
+			.Padding(0.0f, 24.0f, 0.0f, 0.0f)
 			[
-				SNew(SVerticalBox)
-
-				// Row 1 (Pollo Blanco, Pollo Chocolate, Próximamente)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+				SNew(SBox)
+				.WidthOverride(500.0f)
+				.HeightOverride(90.0f)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					SNew(SImage)
+					.Image(BrushTitleBanner.IsValid() ? BrushTitleBanner.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+				]
+			]
+
+			// TOP-LEFT CARD: Character Information Card (Matches user black reference box #2)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Left)
+			.VAlign(VAlign_Top)
+			.Padding(42.0f, 38.0f, 0.0f, 0.0f)
+			[
+				BuildCharacterInfoCard()
+			]
+
+			// RIGHT SIDE: Elegant 3x3 Fighter Grid Board (Matches user black reference box #3)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Top)
+			.Padding(0.0f, 215.0f, 85.0f, 0.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(445.0f)
+				.HeightOverride(430.0f)
+				[
+					SNew(SOverlay)
+
+					// Board Background Texture
+					+ SOverlay::Slot()
+					.HAlign(HAlign_Fill)
+					.VAlign(VAlign_Fill)
 					[
-						BuildCharacterGridSlot(EPanFightersCharacter::PolloBlanco, FText::FromString(TEXT("POLLO BLANCO")), BrushPolloBlanco, true)
+						SNew(SImage)
+						.Image(BrushGridBg.IsValid() ? BrushGridBg.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
 					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+
+					// 3x3 Slots Inner Container
+					+ SOverlay::Slot()
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
+					.Padding(20.0f, 20.0f, 20.0f, 20.0f)
 					[
-						BuildCharacterGridSlot(EPanFightersCharacter::PolloChocolate, FText::FromString(TEXT("POLLO CHOCOLATE")), BrushPolloChocolate, true)
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+						SNew(SVerticalBox)
+
+						// Row 1 (Pollo Blanco, Pollo Chocolate, Próximamente)
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::PolloBlanco, FText::FromString(TEXT("POLLO BLANCO")), BrushPolloBlanco, true)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::PolloChocolate, FText::FromString(TEXT("POLLO CHOCOLATE")), BrushPolloChocolate, true)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+						]
+
+						// Row 2 (Próximamente x3)
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+						]
+
+						// Row 3 (Próximamente x3)
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+							]
+						]
 					]
 				]
+			]
 
-				// Row 2 (Próximamente x3)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+			// BOTTOM CORNER NAVIGATION BUTTONS (Rustic wood panel with bronze border and rivets)
+			// Bottom-Left Button: MENÚ PRINCIPAL (Matches user black reference box #5)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Left)
+			.VAlign(VAlign_Bottom)
+			.Padding(42.0f, 0.0f, 0.0f, 32.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(230.0f)
+				.HeightOverride(52.0f)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					SNew(SButton)
+					.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+					.ContentPadding(FMargin(0.0f))
+					.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnBackToMainMenuClicked))
 					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
-					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+						SNew(SOverlay)
+
+						+ SOverlay::Slot()
+						.HAlign(HAlign_Fill)
+						.VAlign(VAlign_Fill)
+						[
+							SNew(SImage)
+							.Image(BrushNavButton.IsValid() ? BrushNavButton.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+							.ColorAndOpacity(BrushNavButton.IsValid() ? FLinearColor::White : FLinearColor(0.18f, 0.12f, 0.08f, 0.95f))
+						]
+
+						+ SOverlay::Slot()
+						.HAlign(HAlign_Center)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(FText::FromString(TEXT("« MENÚ PRINCIPAL")))
+							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+							.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.92f, 0.70f, 1.0f)))
+							.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.85f))
+							.ShadowOffset(FVector2D(1.0f, 1.0f))
+						]
 					]
 				]
+			]
 
-				// Row 3 (Próximamente x3)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
+			// Bottom-Right Button: ELEGIR ESCENARIO (Matches user black reference box #4)
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Bottom)
+			.Padding(0.0f, 0.0f, 85.0f, 32.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(230.0f)
+				.HeightOverride(52.0f)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					SNew(SButton)
+					.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+					.ContentPadding(FMargin(0.0f))
+					.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnConfirmCharacterClicked))
 					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
-					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
-					]
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					[
-						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+						SNew(SOverlay)
+
+						+ SOverlay::Slot()
+						.HAlign(HAlign_Fill)
+						.VAlign(VAlign_Fill)
+						[
+							SNew(SImage)
+							.Image(BrushNavButton.IsValid() ? BrushNavButton.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+							.ColorAndOpacity(BrushNavButton.IsValid() ? FLinearColor::White : FLinearColor(0.18f, 0.12f, 0.08f, 0.95f))
+						]
+
+						+ SOverlay::Slot()
+						.HAlign(HAlign_Center)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(FText::FromString(TEXT("ELEGIR ESCENARIO »")))
+							.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+							.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.92f, 0.70f, 1.0f)))
+							.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.85f))
+							.ShadowOffset(FVector2D(1.0f, 1.0f))
+						]
 					]
 				]
 			]
 		]
 	];
-	// Bottom area is completely clean (no buttons) to let pedestal, character, and dirt ground shine naturally!
 }
 
+// --------------------------------------------------------------------------
+// STAGE SELECT MENU BUILDER (Con imágenes reales de cada mapa)
 // --------------------------------------------------------------------------
 TSharedRef<SWidget> SPanFightersMasterWidget::BuildStageSelectMenu()
 {

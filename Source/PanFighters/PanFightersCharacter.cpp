@@ -8,6 +8,9 @@
 #include "EnhancedInputComponent.h"
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "PanFightersCameraManager.h"
 #include "PanFighters.h"
 
 APanFightersCharacter::APanFightersCharacter()
@@ -117,4 +120,41 @@ void APanFightersCharacter::DoJumpEnd()
 {
 	// pass StopJumping to the character
 	StopJumping();
+}
+
+void APanFightersCharacter::TriggerHitImpactFeedback(int32 ComboStep, float DamageMultiplier)
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	APlayerCameraManager* BaseCamMgr = PC ? PC->PlayerCameraManager.Get() : UGameplayStatics::GetPlayerCameraManager(this, 0);
+	APanFightersCameraManager* CamMgr = Cast<APanFightersCameraManager>(BaseCamMgr);
+	if (!CamMgr)
+	{
+		return;
+	}
+
+	const bool bIsComboFinisher = (ComboStep >= 3);
+	const bool bHasAjiBoost = (DamageMultiplier > 1.2f);
+
+	float HitstopSeconds = 0.028f;
+	float Dilation = 0.12f;
+	float ShakeStrength = 0.35f;
+	float ShakeDuration = 0.10f;
+
+	if (bIsComboFinisher && bHasAjiBoost)
+	{
+		HitstopSeconds = 0.060f;
+		Dilation = 0.04f;
+		ShakeStrength = 1.45f;
+		ShakeDuration = 0.24f;
+	}
+	else if (bIsComboFinisher || bHasAjiBoost)
+	{
+		HitstopSeconds = 0.048f;
+		Dilation = 0.06f;
+		ShakeStrength = 1.00f;
+		ShakeDuration = 0.18f;
+	}
+
+	CamMgr->TriggerHitstop(HitstopSeconds, Dilation);
+	CamMgr->TriggerImpactShake(ShakeStrength, ShakeDuration);
 }

@@ -196,6 +196,8 @@ private:
 	TSharedPtr<FSlateBrush> BrushCardBg;
 	TSharedPtr<FSlateBrush> BrushGridBg;
 	TSharedPtr<FSlateBrush> BrushSlotLocked;
+	TSharedPtr<FSlateBrush> BrushNavButton;
+	TSharedPtr<FSlateBrush> BrushMainMenuBg;
 
 	// In-game combat HUD & Hit reaction state
 	float HitReactionAlpha = 0.0f;

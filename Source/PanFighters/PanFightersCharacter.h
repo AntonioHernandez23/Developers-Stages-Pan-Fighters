@@ -90,5 +90,9 @@ public:
 	/** Returns first person camera component **/
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 
+	/** Triggers hitstop micro-pause and procedural camera shake scaled by combo step and power-ups. */
+	UFUNCTION(BlueprintCallable, Category="Combat|Feedback")
+	void TriggerHitImpactFeedback(int32 ComboStep, float DamageMultiplier = 1.0f);
+
 };
 

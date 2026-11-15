@@ -13,6 +13,7 @@ class SPanFightersMasterWidget;
 class ACameraActor;
 class UAudioComponent;
 class USoundBase;
+class APanFightersDropBeacon;
 
 /**
  *  Pan Fighters Player Controller
@@ -248,20 +249,46 @@ protected:
 	/** Base yaw orientation of preview rooster */
 	float PreviewRoosterBaseYaw = 0.0f;
 
+	/** Ground location of the character select ring canvas mat for adaptive foot placement */
+	UPROPERTY(Transient)
+	FVector PreviewMatLocation = FVector::ZeroVector;
+
 	/** Whether the last match result was a victory */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Gameplay")
 	bool bLastMatchVictory = true;
 
-	/** Current monitored player health (0 to 100) */
+	/** Current monitored player health (0 to 100 visual percentage) */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Combat")
 	float CurrentPlayerHealth = 100.0f;
 
-	/** Previous frame player health for hit detection */
+	/** Previous frame player health (0 to 100) for hit detection */
 	float PreviousPlayerHealth = 100.0f;
 
-	/** Current monitored rival health (0 to 100) */
+	/** Current monitored rival health (0 to 100 visual percentage) */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Combat")
 	float CurrentRivalHealth = 100.0f;
+
+	/** Internal maximum health for player (visual bars remain 0 to 100) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Combat")
+	float MaxPlayerHealth = 350.0f;
+
+	/** Internal maximum health for rivals (visual bars remain 0 to 100) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Combat")
+	float MaxRivalHealth = 350.0f;
+
+	/** Baseline walk speed restored whenever a stage is selected or buffs expire */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Combat")
+	float DefaultPlayerWalkSpeed = 300.0f;
+
+	/** Baseline movement speed enforced on all rival roosters (+5% over original 245) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Combat")
+	float DefaultRivalWalkSpeed = 257.25f;
+
+	/** Active sky-drop beacons spawned for the current stage */
+	TArray<TWeakObjectPtr<APanFightersDropBeacon>> ActiveDropBeacons;
+
+	/** Timer used to replenish sky-drop items if collected mid-match */
+	float SkyDropRespawnTimer = 0.0f;
 
 	/** Timer after match decisive hit before popup appears */
 	float MatchFinishTimer = 0.0f;
@@ -293,9 +320,34 @@ protected:
 	/** Returns true if the player should use UMG touch controls */
 	bool ShouldUseTouchControls() const;
 
+	/** Returns the normalized 0..100 health percentage for UI display */
+	float GetActorNormalizedHealth(AActor* InActor, float MaxHealth) const;
+
+	/** Resets player and rival Blueprint/character states, speeds, effects, and health */
+	void ResetCharacterAndRivalStates();
+
+	/** Clears all active sky drops and leftover PowerUp actors in the world */
+	void ClearStagePowerUps();
+
+	/** Regenerates sky-falling PowerUps strictly within the target stage's playable platform */
+	void RegenerateStagePowerUps(EPanFightersStage Stage);
+
+	/** Spawns one PowerUp from the sky with a visual landing indicator on the target platform */
+	void SpawnSkyDropItem(EPanFightersStage Stage, AActor* PlatformActor, UClass* PowerUpClass, const FLinearColor& BeaconColor, TArray<FVector>& InOutUsedPoints, float SpawnDelaySeconds = 0.0f);
+
+	/** Finds the playable platform actor for the given stage */
+	AActor* FindStagePlatformActor(EPanFightersStage Stage) const;
+
+	/** Finds a validated random landing point strictly on the stage playable platform */
+	bool FindRandomDropPointOnPlatform(EPanFightersStage Stage, AActor* PlatformActor, const TArray<FVector>& AvoidLocations, FVector& OutFloorPoint) const;
+
+	/** Stage keyword and fallback arena center helpers */
+	static FString GetStageKeyword(EPanFightersStage Stage);
+	static FVector GetStageFallbackCenter(EPanFightersStage Stage);
+
 	/** Finds the CameraActor for a given stage in the active world */
-	ACameraActor* FindStageCamera(EPanFightersStage Stage);
+	ACameraActor* FindStageCamera(EPanFightersStage Stage) const;
 
 	/** Finds the PlayerStart actor for a given stage in the active world */
-	AActor* FindStagePlayerStart(EPanFightersStage Stage);
+	AActor* FindStagePlayerStart(EPanFightersStage Stage) const;
 };
