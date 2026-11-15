@@ -184,6 +184,18 @@ private:
 	float SFXVolume = 0.9f;
 	int32 GraphicsQualityLevel = 3;
 
+	// Localization state (false = Español, true = English)
+	bool bIsEnglish = false;
+	bool bPendingLanguageSwitch = false;
+	bool bTargetLanguageIsEnglish = false;
+	float LanguageSwitchTimer = 0.0f;
+	float LanguageSwitchDelay = 1.2f;
+
+	FText Tr(const TCHAR* EsText, const TCHAR* EnText) const
+	{
+		return FText::FromString(bIsEnglish ? EnText : EsText);
+	}
+
 	// Stage & Splash & Character Preview Image Brushes
 	TSharedPtr<FSlateBrush> BrushRanchito;
 	TSharedPtr<FSlateBrush> BrushCampoLlano;
