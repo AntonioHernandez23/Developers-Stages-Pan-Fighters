@@ -11,6 +11,10 @@
 #include "UI/SPanFightersMasterWidget.h"
 #include "EngineUtils.h"
 #include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
+#include "Engine/StaticMeshActor.h"
+#include "Components/StaticMeshComponent.h"
+#include "ImageUtils.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/Character.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -18,12 +22,42 @@
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "UObject/UObjectIterator.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundWave.h"
+#include "UObject/ConstructorHelpers.h"
 
 APanFightersPlayerController::APanFightersPlayerController()
 {
 	PlayerCameraManagerClass = APanFightersCameraManager::StaticClass();
 	SplashDuration = 5.0f;
 	bEnableStartupSplash = true;
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> MainMenuMusicFinder(TEXT("/Game/Audio/BGM/Mus_MainMenu.Mus_MainMenu"));
+	if (MainMenuMusicFinder.Succeeded())
+	{
+		MainMenuMusic = MainMenuMusicFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> SelectionMusicFinder(TEXT("/Game/Audio/BGM/Mus_Selection.Mus_Selection"));
+	if (SelectionMusicFinder.Succeeded())
+	{
+		SelectionMenuMusic = SelectionMusicFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> FightMusicFinder(TEXT("/Game/Audio/BGM/Mus_Fight.Mus_Fight"));
+	if (FightMusicFinder.Succeeded())
+	{
+		FightMusic = FightMusicFinder.Object;
+	}
+	else
+	{
+		static ConstructorHelpers::FObjectFinder<USoundBase> FightFallbackFinder(TEXT("/Game/Audio/BGM/kf029904-at-war.kf029904-at-war"));
+		if (FightFallbackFinder.Succeeded())
+		{
+			FightMusic = FightFallbackFinder.Object;
+		}
+	}
 }
 
 void APanFightersPlayerController::BeginPlay()
@@ -127,9 +161,98 @@ void APanFightersPlayerController::SetScreenState(EPanFightersScreenState NewSta
 	}
 }
 
+void APanFightersPlayerController::PlayBGM(USoundBase* NewMusic, float FadeTime)
+{
+	if (!NewMusic)
+	{
+		return;
+	}
+
+	if (USoundWave* Wave = Cast<USoundWave>(NewMusic))
+	{
+		Wave->bLooping = true;
+	}
+
+	if (BGMComponent && BGMComponent->Sound == NewMusic && BGMComponent->IsPlaying())
+	{
+		return;
+	}
+
+	if (BGMComponent && BGMComponent->IsPlaying())
+	{
+		BGMComponent->FadeOut(FadeTime, 0.0f);
+	}
+
+	BGMComponent = UGameplayStatics::SpawnSound2D(this, NewMusic, 1.0f, 1.0f, 0.0f, nullptr, true, true);
+	if (BGMComponent)
+	{
+		BGMComponent->bIsUISound = true;
+		BGMComponent->FadeIn(FadeTime, 1.0f);
+	}
+}
+
+void APanFightersPlayerController::StopBGM(float FadeTime)
+{
+	if (BGMComponent && BGMComponent->IsPlaying())
+	{
+		BGMComponent->FadeOut(FadeTime, 0.0f);
+	}
+}
+
 void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState NewState)
 {
+	const EPanFightersScreenState PreviousState = CurrentScreenState;
 	CurrentScreenState = NewState;
+
+	if (PreviousState == EPanFightersScreenState::CharacterSelect && NewState != EPanFightersScreenState::CharacterSelect)
+	{
+		CleanupCharacterSelectScene();
+	}
+
+	if (NewState == EPanFightersScreenState::Splash)
+	{
+		StopBGM(0.0f);
+	}
+	else if (NewState == EPanFightersScreenState::MainMenu)
+	{
+		PlayBGM(MainMenuMusic, 0.8f);
+	}
+	else if (NewState == EPanFightersScreenState::CharacterSelect)
+	{
+		PlayBGM(SelectionMenuMusic, 0.8f);
+
+		GetOrCreatePreviewRooster();
+		UpdatePreviewRoosterVisuals();
+		SetupCharacterSelectScene();
+	}
+	else if (NewState == EPanFightersScreenState::StageSelect)
+	{
+		PlayBGM(SelectionMenuMusic, 0.8f);
+	}
+	else if (NewState == EPanFightersScreenState::InGame)
+	{
+		if (!FightMusic)
+		{
+			FightMusic = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/BGM/Mus_Fight.Mus_Fight")));
+			if (!FightMusic)
+			{
+				FightMusic = Cast<USoundBase>(StaticLoadObject(USoundBase::StaticClass(), nullptr, TEXT("/Game/Audio/BGM/kf029904-at-war.kf029904-at-war")));
+			}
+		}
+
+		if (FightMusic)
+		{
+			PlayBGM(FightMusic, 0.8f);
+		}
+		else
+		{
+			StopBGM(1.0f);
+		}
+	}
+	else if (NewState == EPanFightersScreenState::MatchResult)
+	{
+		StopBGM(1.2f);
+	}
 
 	if (NewState == EPanFightersScreenState::InGame)
 	{
@@ -167,6 +290,8 @@ void APanFightersPlayerController::OnScreenStateChanged(EPanFightersScreenState 
 
 void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 {
+	CleanupCharacterSelectScene();
+
 	CurrentStage = Stage;
 
 	// Reset combat states for the new / retried match
@@ -269,6 +394,32 @@ void APanFightersPlayerController::SelectStage(EPanFightersStage Stage)
 		{
 			SetActorHealth(ActiveRival, 100.0f);
 		}
+
+		// Apply selected character skin to player's pawn mesh in combat
+		USkeletalMeshComponent* MeshComp = MyPawn->FindComponentByClass<USkeletalMeshComponent>();
+		if (MeshComp)
+		{
+			if (SelectedCharacter == EPanFightersCharacter::PolloChocolate)
+			{
+				UMaterialInterface* ChocMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/ElRanchito/Materials/MI_PolloCafe.MI_PolloCafe")));
+				if (!ChocMat)
+				{
+					ChocMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Stages/01_ElRanchito/ElRanchito_Assets/Materials/MI_PolloCafe.MI_PolloCafe")));
+				}
+				if (ChocMat)
+				{
+					MeshComp->SetMaterial(0, ChocMat);
+				}
+			}
+			else
+			{
+				UMaterialInterface* WhiteMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001")));
+				if (WhiteMat)
+				{
+					MeshComp->SetMaterial(0, WhiteMat);
+				}
+			}
+		}
 	}
 
 	// 4. Notify widget and switch to InGame view
@@ -319,7 +470,141 @@ void APanFightersPlayerController::QuitGameAction()
 void APanFightersPlayerController::SelectCharacter(EPanFightersCharacter InCharacter)
 {
 	SelectedCharacter = InCharacter;
+	UpdatePreviewRoosterVisuals();
 	SetScreenState(EPanFightersScreenState::StageSelect);
+}
+
+void APanFightersPlayerController::SetPreviewCharacter(EPanFightersCharacter InCharacter)
+{
+	SelectedCharacter = InCharacter;
+	UpdatePreviewRoosterVisuals();
+}
+
+void APanFightersPlayerController::ConfirmCharacterAndProceed()
+{
+	SetScreenState(EPanFightersScreenState::StageSelect);
+}
+
+AActor* APanFightersPlayerController::GetOrCreatePreviewRooster()
+{
+	if (PreviewRoosterActor && IsValid(PreviewRoosterActor))
+	{
+		return PreviewRoosterActor;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (A && A->GetName().Contains(TEXT("Ranchito"), ESearchCase::IgnoreCase) && A->GetName().Contains(TEXT("Gallo"), ESearchCase::IgnoreCase))
+		{
+			PreviewRoosterActor = A;
+			PreviewRoosterBaseYaw = A->GetActorRotation().Yaw;
+			return PreviewRoosterActor;
+		}
+	}
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (A && A->GetClass()->GetName().Contains(TEXT("BP_Gallo")))
+		{
+			PreviewRoosterActor = A;
+			PreviewRoosterBaseYaw = A->GetActorRotation().Yaw;
+			return PreviewRoosterActor;
+		}
+	}
+
+	if (APawn* MyPawn = GetPawn())
+	{
+		PreviewRoosterActor = MyPawn;
+		PreviewRoosterBaseYaw = MyPawn->GetActorRotation().Yaw;
+		return PreviewRoosterActor;
+	}
+
+	return nullptr;
+}
+
+void APanFightersPlayerController::UpdatePreviewRoosterVisuals()
+{
+	AActor* Rooster = GetOrCreatePreviewRooster();
+	if (!Rooster)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* MeshComp = Rooster->FindComponentByClass<USkeletalMeshComponent>();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	if (SelectedCharacter == EPanFightersCharacter::PolloChocolate)
+	{
+		UMaterialInterface* ChocMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/ElRanchito/Materials/MI_PolloCafe.MI_PolloCafe")));
+		if (!ChocMat)
+		{
+			ChocMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Stages/01_ElRanchito/ElRanchito_Assets/Materials/MI_PolloCafe.MI_PolloCafe")));
+		}
+
+		if (ChocMat)
+		{
+			MeshComp->SetMaterial(0, ChocMat);
+		}
+		else
+		{
+			UMaterialInstanceDynamic* DynMat = MeshComp->CreateDynamicMaterialInstance(0);
+			if (DynMat)
+			{
+				DynMat->SetVectorParameterValue(TEXT("Base Color"), FLinearColor(0.25f, 0.12f, 0.05f, 1.0f));
+			}
+		}
+	}
+	else
+	{
+		UMaterialInterface* WhiteMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001")));
+		if (WhiteMat)
+		{
+			MeshComp->SetMaterial(0, WhiteMat);
+		}
+	}
+}
+
+void APanFightersPlayerController::RotatePreviewRooster(float DeltaYaw)
+{
+	AActor* Rooster = GetOrCreatePreviewRooster();
+	if (Rooster)
+	{
+		Rooster->AddActorWorldRotation(FRotator(0.0f, DeltaYaw, 0.0f));
+	}
+}
+
+void APanFightersPlayerController::UpdatePreviewRoosterHover(FVector2D ScreenPos)
+{
+	AActor* Rooster = GetOrCreatePreviewRooster();
+	if (!Rooster)
+	{
+		return;
+	}
+
+	int32 ViewportSizeX = 1920;
+	int32 ViewportSizeY = 1080;
+	GetViewportSize(ViewportSizeX, ViewportSizeY);
+
+	if (ViewportSizeX > 0 && GetWorld())
+	{
+		const float NormalizedX = (ScreenPos.X / (float)ViewportSizeX) - 0.5f;
+		const float SubtleYawOffset = NormalizedX * 30.0f;
+
+		FRotator TargetRot = Rooster->GetActorRotation();
+		TargetRot.Yaw = FMath::FInterpTo(TargetRot.Yaw, PreviewRoosterBaseYaw + SubtleYawOffset, GetWorld()->GetDeltaSeconds(), 6.0f);
+		Rooster->SetActorRotation(TargetRot);
+	}
 }
 
 void APanFightersPlayerController::ReturnToCharacterSelect()
@@ -660,4 +945,174 @@ AActor* APanFightersPlayerController::FindStagePlayerStart(EPanFightersStage Sta
 bool APanFightersPlayerController::ShouldUseTouchControls() const
 {
 	return SVirtualJoystick::ShouldDisplayTouchInterface() || bForceTouchControls;
+}
+
+void APanFightersPlayerController::SetupCharacterSelectScene()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// 1. Hide floating powerups (coffee mug, plantain, chili) that clutter the area in front of the preview rooster
+	HiddenPowerupActors.Empty();
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A) continue;
+		const FString Name = A->GetName();
+		if (Name.Contains(TEXT("TazaCafe"), ESearchCase::IgnoreCase) ||
+			Name.Contains(TEXT("Patacon"), ESearchCase::IgnoreCase) ||
+			Name.Contains(TEXT("AjiChombo"), ESearchCase::IgnoreCase) ||
+			Name.Contains(TEXT("PowerUp"), ESearchCase::IgnoreCase))
+		{
+			if (!A->IsHidden())
+			{
+				A->SetActorHiddenInGame(true);
+				A->SetActorEnableCollision(false);
+				HiddenPowerupActors.Add(A);
+			}
+		}
+	}
+
+	// 2. Locate or get the preview rooster
+	AActor* Rooster = GetOrCreatePreviewRooster();
+	if (!Rooster)
+	{
+		return;
+	}
+
+	const FVector RoosterLoc = Rooster->GetActorLocation();
+	const FRotator RoosterRot = Rooster->GetActorRotation();
+	const FVector Forward = RoosterRot.Vector();
+	const FVector Right = FRotationMatrix(RoosterRot).GetScaledAxis(EAxis::Y);
+
+	// 3. Spawn or place the circular ring canvas mat right at the rooster's feet
+	FVector MatLoc = RoosterLoc;
+	FHitResult GroundHit;
+	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(MatGroundTrace), false, Rooster);
+	if (World->LineTraceSingleByChannel(GroundHit, RoosterLoc + FVector(0.0f, 0.0f, 50.0f), RoosterLoc - FVector(0.0f, 0.0f, 300.0f), ECC_Visibility, TraceParams))
+	{
+		MatLoc.Z = GroundHit.Location.Z + 1.2f;
+	}
+	else
+	{
+		MatLoc.Z -= 88.0f;
+	}
+
+	if (!RingCanvasPedestalActor || !IsValid(RingCanvasPedestalActor))
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AStaticMeshActor* MeshActor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), MatLoc, FRotator::ZeroRotator, SpawnParams);
+		if (MeshActor)
+		{
+			RingCanvasPedestalActor = MeshActor;
+			UStaticMeshComponent* SMC = MeshActor->GetStaticMeshComponent();
+			if (SMC)
+			{
+				UStaticMesh* CylinderMesh = Cast<UStaticMesh>(StaticLoadObject(UStaticMesh::StaticClass(), nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")));
+				if (CylinderMesh)
+				{
+					SMC->SetStaticMesh(CylinderMesh);
+					SMC->SetRelativeScale3D(FVector(2.7f, 2.7f, 0.004f));
+				}
+
+				UTexture2D* RingTex = FImageUtils::ImportFileAsTexture2D(FPaths::ProjectContentDir() / TEXT("UI/T_LonaRingBoxeo.png"));
+				if (RingTex)
+				{
+					RingTex->AddToRoot();
+					UMaterialInterface* BaseMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Game/Characters/GalloBlanco/Textures/Material_001.Material_001")));
+					if (!BaseMat)
+					{
+						BaseMat = Cast<UMaterialInterface>(StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial")));
+					}
+					if (BaseMat)
+					{
+						UMaterialInstanceDynamic* DynMat = UMaterialInstanceDynamic::Create(BaseMat, MeshActor);
+						if (DynMat)
+						{
+							DynMat->SetTextureParameterValue(FName(TEXT("DiffuseColorMap")), RingTex);
+							DynMat->SetTextureParameterValue(FName(TEXT("Texture")), RingTex);
+							DynMat->SetTextureParameterValue(FName(TEXT("BaseColor")), RingTex);
+							DynMat->SetTextureParameterValue(FName(TEXT("Base Color")), RingTex);
+							DynMat->SetVectorParameterValue(FName(TEXT("Color")), FLinearColor::White);
+							SMC->SetMaterial(0, DynMat);
+						}
+					}
+				}
+				SMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			}
+		}
+	}
+	else
+	{
+		RingCanvasPedestalActor->SetActorLocation(MatLoc);
+		RingCanvasPedestalActor->SetActorHiddenInGame(false);
+	}
+
+	// 4. Setup close-up Hero Camera with Depth-of-Field framing the rooster on the left-center
+	// Positioned in front of the rooster, offset slightly to the right so rooster appears on left-center
+	const FVector CamLoc = RoosterLoc + Forward * 230.0f + Right * 42.0f + FVector(0.0f, 0.0f, 18.0f);
+	const FRotator CamRot = (RoosterLoc + FVector(0.0f, 0.0f, 14.0f) - CamLoc).Rotation();
+
+	if (!CharacterSelectCameraActor || !IsValid(CharacterSelectCameraActor))
+	{
+		FActorSpawnParameters CamSpawnParams;
+		CamSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		CharacterSelectCameraActor = World->SpawnActor<ACameraActor>(ACameraActor::StaticClass(), CamLoc, CamRot, CamSpawnParams);
+	}
+	else
+	{
+		CharacterSelectCameraActor->SetActorLocationAndRotation(CamLoc, CamRot);
+	}
+
+	if (CharacterSelectCameraActor)
+	{
+		UCameraComponent* CamComp = CharacterSelectCameraActor->GetCameraComponent();
+		if (CamComp)
+		{
+			CamComp->FieldOfView = 62.0f;
+
+			// Cinematic Depth-of-field: blur farm background, rooster in focus
+			const float FocalDist = (CamLoc - RoosterLoc).Size();
+			CamComp->PostProcessSettings.bOverride_DepthOfFieldFstop = true;
+			CamComp->PostProcessSettings.DepthOfFieldFstop = 1.4f;
+			CamComp->PostProcessSettings.bOverride_DepthOfFieldFocalDistance = true;
+			CamComp->PostProcessSettings.DepthOfFieldFocalDistance = FocalDist;
+			CamComp->PostProcessSettings.bOverride_DepthOfFieldSensorWidth = true;
+			CamComp->PostProcessSettings.DepthOfFieldSensorWidth = 56.0f;
+		}
+
+		SetViewTarget(CharacterSelectCameraActor);
+	}
+}
+
+void APanFightersPlayerController::CleanupCharacterSelectScene()
+{
+	// Restore hidden powerup actors
+	for (TWeakObjectPtr<AActor>& WeakA : HiddenPowerupActors)
+	{
+		if (WeakA.IsValid())
+		{
+			WeakA->SetActorHiddenInGame(false);
+			WeakA->SetActorEnableCollision(true);
+		}
+	}
+	HiddenPowerupActors.Empty();
+
+	// Destroy ring canvas pedestal actor
+	if (RingCanvasPedestalActor && IsValid(RingCanvasPedestalActor))
+	{
+		RingCanvasPedestalActor->Destroy();
+		RingCanvasPedestalActor = nullptr;
+	}
+
+	// Destroy character select camera actor if created
+	if (CharacterSelectCameraActor && IsValid(CharacterSelectCameraActor))
+	{
+		CharacterSelectCameraActor->Destroy();
+		CharacterSelectCameraActor = nullptr;
+	}
 }

@@ -11,6 +11,8 @@ class UInputMappingContext;
 class UUserWidget;
 class SPanFightersMasterWidget;
 class ACameraActor;
+class UAudioComponent;
+class USoundBase;
 
 /**
  *  Pan Fighters Player Controller
@@ -31,6 +33,27 @@ public:
 	/** Selects a character and transitions to stage selection */
 	UFUNCTION(BlueprintCallable, Category = "PanFighters|Character")
 	void SelectCharacter(EPanFightersCharacter InCharacter);
+
+	/** Sets active character preview in selection screen without leaving the menu */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Character")
+	void SetPreviewCharacter(EPanFightersCharacter InCharacter);
+
+	/** Confirms the currently selected character and advances to stage selection */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Character")
+	void ConfirmCharacterAndProceed();
+
+	/** Rotates the 3D preview rooster actor by yaw delta */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Character")
+	void RotatePreviewRooster(float DeltaYaw);
+
+	/** Updates preview rooster gaze / hover towards mouse position */
+	void UpdatePreviewRoosterHover(FVector2D ScreenPos);
+
+	/** Finds or gets the 3D preview rooster actor */
+	AActor* GetOrCreatePreviewRooster();
+
+	/** Updates the visual skin/materials of the preview rooster */
+	void UpdatePreviewRoosterVisuals();
 
 	/** Returns the currently selected character */
 	UFUNCTION(BlueprintPure, Category = "PanFighters|Character")
@@ -150,7 +173,49 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PanFighters|UI")
 	bool bEnableStartupSplash = true;
 
+	/** Plays or crossfades background music */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Audio")
+	void PlayBGM(USoundBase* NewMusic, float FadeTime = 0.8f);
+
+	/** Stops background music with fade */
+	UFUNCTION(BlueprintCallable, Category = "PanFighters|Audio")
+	void StopBGM(float FadeTime = 0.8f);
+
 protected:
+
+	/** Audio component for background music */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> BGMComponent;
+
+	/** Music track for Splash & Main Menu */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> MainMenuMusic;
+
+	/** Music track for Character Selection & Stage Selection */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> SelectionMenuMusic;
+
+	/** Music track for In-Game Rooster Fight */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "PanFighters|Audio")
+	TObjectPtr<USoundBase> FightMusic;
+
+	/** Dedicated close-up camera for character selection with Depth of Field */
+	UPROPERTY(Transient)
+	TObjectPtr<ACameraActor> CharacterSelectCameraActor;
+
+	/** Circular flat ring canvas mat actor at rooster's feet */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> RingCanvasPedestalActor;
+
+	/** Saved hidden powerup actors during character selection */
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<AActor>> HiddenPowerupActors;
+
+	/** Sets up the close-up camera and ring mat for character select */
+	void SetupCharacterSelectScene();
+
+	/** Cleans up the character select scene props and camera */
+	void CleanupCharacterSelectScene();
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category="Input|Input Mappings")
@@ -175,6 +240,13 @@ protected:
 	/** Currently selected playable character */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Character")
 	EPanFightersCharacter SelectedCharacter = EPanFightersCharacter::PolloBlanco;
+
+	/** Reference to the 3D preview rooster actor during character selection */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> PreviewRoosterActor;
+
+	/** Base yaw orientation of preview rooster */
+	float PreviewRoosterBaseYaw = 0.0f;
 
 	/** Whether the last match result was a victory */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "PanFighters|Gameplay")

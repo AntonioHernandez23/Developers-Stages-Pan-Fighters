@@ -168,9 +168,13 @@ void SPanFightersMasterWidget::LoadStageImages()
 	BrushSplash = LoadImageBrush(FPaths::ProjectContentDir() / TEXT("UI/Splash/Img_Splash.jpg"), FVector2D(1024.0f, 572.0f));
 
 	const FString UIContentDir = FPaths::ProjectContentDir() / TEXT("UI/");
-	BrushPolloBlanco = LoadImageBrush(UIContentDir / TEXT("Img_PolloBlanco.jpg"), FVector2D(240.0f, 260.0f));
-	BrushPolloChocolate = LoadImageBrush(UIContentDir / TEXT("Img_PolloChocolate.jpg"), FVector2D(240.0f, 260.0f));
-	BrushPolloAmarillo = LoadImageBrush(UIContentDir / TEXT("Img_PolloAmarillo.jpg"), FVector2D(240.0f, 260.0f));
+	BrushPolloBlanco = LoadImageBrush(UIContentDir / TEXT("Img_PolloBlanco.jpg"), FVector2D(256.0f, 256.0f));
+	BrushPolloChocolate = LoadImageBrush(UIContentDir / TEXT("Img_PolloChocolate.jpg"), FVector2D(256.0f, 256.0f));
+	BrushPolloAmarillo = LoadImageBrush(UIContentDir / TEXT("Img_PolloAmarillo.jpg"), FVector2D(256.0f, 256.0f));
+	BrushTitleBanner = LoadImageBrush(UIContentDir / TEXT("T_BannerTituloMadera.png"), FVector2D(495.0f, 88.0f));
+	BrushCardBg = LoadImageBrush(UIContentDir / TEXT("T_CardBackground.png"), FVector2D(280.0f, 110.0f));
+	BrushGridBg = LoadImageBrush(UIContentDir / TEXT("T_GridBackground.png"), FVector2D(450.0f, 430.0f));
+	BrushSlotLocked = LoadImageBrush(UIContentDir / TEXT("T_SlotLocked.png"), FVector2D(120.0f, 120.0f));
 }
 
 void SPanFightersMasterWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
@@ -242,6 +246,43 @@ void SPanFightersMasterWidget::Tick(const FGeometry& AllottedGeometry, const dou
 FReply SPanFightersMasterWidget::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
 {
 	const FKey Key = InKeyEvent.GetKey();
+
+	if (CurrentState == EPanFightersScreenState::CharacterSelect)
+	{
+		if (Key == EKeys::Escape)
+		{
+			if (OwnerPC.IsValid())
+			{
+				OwnerPC->ReturnToMainMenu();
+				return FReply::Handled();
+			}
+		}
+		else if (Key == EKeys::Enter || Key == EKeys::SpaceBar)
+		{
+			if (OwnerPC.IsValid())
+			{
+				OwnerPC->ConfirmCharacterAndProceed();
+				return FReply::Handled();
+			}
+		}
+		else if (Key == EKeys::Left || Key == EKeys::A)
+		{
+			if (OwnerPC.IsValid())
+			{
+				OwnerPC->SetPreviewCharacter(EPanFightersCharacter::PolloBlanco);
+				return FReply::Handled();
+			}
+		}
+		else if (Key == EKeys::Right || Key == EKeys::D)
+		{
+			if (OwnerPC.IsValid())
+			{
+				OwnerPC->SetPreviewCharacter(EPanFightersCharacter::PolloChocolate);
+				return FReply::Handled();
+			}
+		}
+	}
+
 	if (Key == EKeys::Escape || Key == EKeys::P || Key == EKeys::M)
 	{
 		if (CurrentState == EPanFightersScreenState::InGame || CurrentState == EPanFightersScreenState::InGameMenu)
@@ -254,6 +295,51 @@ FReply SPanFightersMasterWidget::OnKeyDown(const FGeometry& MyGeometry, const FK
 		}
 	}
 	return SCompoundWidget::OnKeyDown(MyGeometry, InKeyEvent);
+}
+
+FReply SPanFightersMasterWidget::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (CurrentState == EPanFightersScreenState::CharacterSelect && MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		bIsDraggingRooster = true;
+		LastMouseDragPos = MouseEvent.GetScreenSpacePosition();
+		return FReply::Handled().CaptureMouse(SharedThis(this));
+	}
+	return SCompoundWidget::OnMouseButtonDown(MyGeometry, MouseEvent);
+}
+
+FReply SPanFightersMasterWidget::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (bIsDraggingRooster && MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		bIsDraggingRooster = false;
+		return FReply::Handled().ReleaseMouseCapture();
+	}
+	return SCompoundWidget::OnMouseButtonUp(MyGeometry, MouseEvent);
+}
+
+FReply SPanFightersMasterWidget::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (CurrentState == EPanFightersScreenState::CharacterSelect)
+	{
+		if (bIsDraggingRooster)
+		{
+			const FVector2D CurrentPos = MouseEvent.GetScreenSpacePosition();
+			const float DeltaX = CurrentPos.X - LastMouseDragPos.X;
+			LastMouseDragPos = CurrentPos;
+
+			if (OwnerPC.IsValid())
+			{
+				OwnerPC->RotatePreviewRooster(-DeltaX * 0.75f);
+			}
+			return FReply::Handled();
+		}
+		else if (OwnerPC.IsValid())
+		{
+			OwnerPC->UpdatePreviewRoosterHover(MouseEvent.GetScreenSpacePosition());
+		}
+	}
+	return SCompoundWidget::OnMouseMove(MyGeometry, MouseEvent);
 }
 
 void SPanFightersMasterWidget::SetScreenState(EPanFightersScreenState NewState)
@@ -297,7 +383,8 @@ void SPanFightersMasterWidget::SetScreenState(EPanFightersScreenState NewState)
 		break;
 
 	case EPanFightersScreenState::CharacterSelect:
-		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor(0.05f, 0.04f, 0.035f, 0.96f));
+		// Translucent/clean container so the 3D rooster in El Ranchito is fully visible and interactable!
+		ScreenContentContainer->SetBorderBackgroundColor(FLinearColor::Transparent);
 		ScreenContentContainer->SetVisibility(EVisibility::Visible);
 		ScreenContentContainer->SetContent(BuildCharacterSelectMenu());
 		break;
@@ -762,219 +849,405 @@ TSharedRef<SWidget> SPanFightersMasterWidget::BuildOptionsMenu()
 // --------------------------------------------------------------------------
 // CHARACTER SELECT MENU BUILDER (Catálogo de 3 Gallos Boxeadores)
 // --------------------------------------------------------------------------
-TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterSelectMenu()
+// CHARACTER SELECT HELPERS & 3D ARCADE FIGHTER GRID (Matching reference image)
+// --------------------------------------------------------------------------
+FText SPanFightersMasterWidget::GetSelectedCharacterCardName() const
 {
-	return SNew(SOverlay)
-
-	+ SOverlay::Slot()
-	.HAlign(HAlign_Center)
-	.VAlign(VAlign_Center)
-	[
-		SNew(SVerticalBox)
-
-		// Main Title
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 0.0f, 0.0f, 20.0f)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("SELECCIÓN DE PERSONAJE")))
-			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 36))
-			.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.82f, 0.35f, 1.0f)))
-		]
-
-		// 3 Character Cards in Horizontal Box
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		[
-			SNew(SHorizontalBox)
-
-			// ---------------- GALLO 1: POLLO BLANCO (NUESTRO PERSONAJE) ----------------
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(12.0f, 0.0f)
-			[
-				BuildCharacterCard(
-					EPanFightersCharacter::PolloBlanco,
-					FText::FromString(TEXT("Pollo Blanco")),
-					FText::FromString(TEXT("El Campeón Blanco")),
-					FText::FromString(TEXT("Nuestro Personaje • Equilibrado y Veloz")),
-					FLinearColor(0.95f, 0.75f, 0.25f, 1.0f),
-					BrushPolloBlanco
-				)
-			]
-
-			// ---------------- GALLO 2: POLLO CHOCOLATE ----------------
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(12.0f, 0.0f)
-			[
-				BuildCharacterCard(
-					EPanFightersCharacter::PolloChocolate,
-					FText::FromString(TEXT("Pollo Chocolate")),
-					FText::FromString(TEXT("Furia Campesina")),
-					FText::FromString(TEXT("Poder Contundente • Gran Resistencia")),
-					FLinearColor(0.85f, 0.48f, 0.22f, 1.0f),
-					BrushPolloChocolate
-				)
-			]
-
-			// ---------------- GALLO 3: POLLO AMARILLO ----------------
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.Padding(12.0f, 0.0f)
-			[
-				BuildCharacterCard(
-					EPanFightersCharacter::PolloAmarillo,
-					FText::FromString(TEXT("Pollo Amarillo")),
-					FText::FromString(TEXT("El Rayo Dorado")),
-					FText::FromString(TEXT("Velocidad Relámpago • Pegada Rápida")),
-					FLinearColor(1.0f, 0.82f, 0.15f, 1.0f),
-					BrushPolloAmarillo
-				)
-			]
-		]
-
-		// Back to Main Menu Button
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.HAlign(HAlign_Center)
-		.Padding(0.0f, 22.0f, 0.0f, 0.0f)
-		[
-			SNew(SBox)
-			.WidthOverride(300.0f)
-			.HeightOverride(42.0f)
-			[
-				SNew(SButton)
-				.ButtonStyle(&FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
-				.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.80f, 0.55f, 0.20f, 1.0f)))
-				.OnClicked(this, &SPanFightersMasterWidget::OnBackToMainMenuClicked)
-				.ContentPadding(FMargin(16.0f, 6.0f))
-				.HAlign(HAlign_Center)
-				.VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("« VOLVER AL MENÚ PRINCIPAL")))
-					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
-					.ColorAndOpacity(FSlateColor(FLinearColor::White))
-				]
-			]
-		]
-	];
+	if (OwnerPC.IsValid() && OwnerPC->GetSelectedCharacter() == EPanFightersCharacter::PolloChocolate)
+	{
+		return FText::FromString(TEXT("POLLO CHOCOLATE"));
+	}
+	return FText::FromString(TEXT("POLLO BLANCO"));
 }
 
-// --------------------------------------------------------------------------
-// HELPER: BUILD CHARACTER CARD
-// --------------------------------------------------------------------------
-TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterCard(
-	EPanFightersCharacter CharacterId,
-	const FText& CharacterName,
-	const FText& CharacterSubtitle,
-	const FText& Description,
-	const FLinearColor& AccentColor,
-	TSharedPtr<FSlateBrush> CharacterBrush)
+FText SPanFightersMasterWidget::GetSelectedCharacterCardSubtitle() const
+{
+	if (OwnerPC.IsValid() && OwnerPC->GetSelectedCharacter() == EPanFightersCharacter::PolloChocolate)
+	{
+		return FText::FromString(TEXT("El Retador Feroz"));
+	}
+	return FText::FromString(TEXT("El Campeon Blanco"));
+}
+
+FText SPanFightersMasterWidget::GetSelectedCharacterCardDescription() const
+{
+	if (OwnerPC.IsValid() && OwnerPC->GetSelectedCharacter() == EPanFightersCharacter::PolloChocolate)
+	{
+		return FText::FromString(TEXT("Fuerza y Pegada Brutal"));
+	}
+	return FText::FromString(TEXT("Equilibrado y Veloz"));
+}
+
+const FSlateBrush* SPanFightersMasterWidget::GetSelectedCharacterCardAvatar() const
+{
+	if (OwnerPC.IsValid() && OwnerPC->GetSelectedCharacter() == EPanFightersCharacter::PolloChocolate)
+	{
+		return BrushPolloChocolate.IsValid() ? BrushPolloChocolate.Get() : FCoreStyle::Get().GetBrush("WhiteBrush");
+	}
+	return BrushPolloBlanco.IsValid() ? BrushPolloBlanco.Get() : FCoreStyle::Get().GetBrush("WhiteBrush");
+}
+
+FSlateColor SPanFightersMasterWidget::GetSelectedSlotBorderColor(EPanFightersCharacter SlotChar) const
+{
+	const EPanFightersCharacter CurrentChar = OwnerPC.IsValid() ? OwnerPC->GetSelectedCharacter() : EPanFightersCharacter::PolloBlanco;
+	if (CurrentChar == SlotChar)
+	{
+		return FSlateColor(FLinearColor(1.0f, 0.88f, 0.22f, 1.0f));
+	}
+	return FSlateColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+}
+
+FReply SPanFightersMasterWidget::OnCharacterSlotClicked(EPanFightersCharacter InChar)
+{
+	if (OwnerPC.IsValid())
+	{
+		if (OwnerPC->GetSelectedCharacter() == InChar)
+		{
+			OwnerPC->ConfirmCharacterAndProceed();
+		}
+		else
+		{
+			OwnerPC->SetPreviewCharacter(InChar);
+		}
+	}
+	return FReply::Handled();
+}
+
+FReply SPanFightersMasterWidget::OnConfirmCharacterClicked()
+{
+	if (OwnerPC.IsValid())
+	{
+		OwnerPC->ConfirmCharacterAndProceed();
+	}
+	else
+	{
+		SetScreenState(EPanFightersScreenState::StageSelect);
+	}
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterInfoCard()
 {
 	return SNew(SBox)
-	.WidthOverride(290.0f)
-	.HeightOverride(430.0f)
-	[
-		SNew(SBorder)
-		.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-		.BorderBackgroundColor(FLinearColor(0.09f, 0.08f, 0.07f, 0.96f))
-		.Padding(FMargin(14.0f, 14.0f))
+		.WidthOverride(290.0f)
+		.HeightOverride(115.0f)
 		[
-			SNew(SVerticalBox)
+			SNew(SOverlay)
 
-			// Character Name
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(0.0f, 0.0f, 0.0f, 2.0f)
+			// 1. Rustic rounded dark wood panel with golden border and corner rivets
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
 			[
-				SNew(STextBlock)
-				.Text(CharacterName)
-				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 20))
-				.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.95f, 0.90f, 1.0f)))
+				SNew(SImage)
+				.Image(BrushCardBg.IsValid() ? BrushCardBg.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.ColorAndOpacity(BrushCardBg.IsValid() ? FLinearColor::White : FLinearColor(0.14f, 0.10f, 0.07f, 0.95f))
 			]
 
-			// Subtitle
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			// 2. Inner Content
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			.Padding(18.0f, 15.0f, 16.0f, 15.0f)
 			[
-				SNew(STextBlock)
-				.Text(CharacterSubtitle)
-				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
-				.ColorAndOpacity(FSlateColor(AccentColor))
-			]
+				SNew(SHorizontalBox)
 
-			// Image Container (260x250)
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			[
-				SNew(SBox)
-				.WidthOverride(260.0f)
-				.HeightOverride(250.0f)
+				// Square Avatar Frame on Left (no '1P', no ribbons)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 14.0f, 0.0f)
 				[
-					SNew(SBorder)
-					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(FLinearColor(0.04f, 0.035f, 0.03f, 1.0f))
-					.Padding(FMargin(2.0f))
+					SNew(SBox)
+					.WidthOverride(64.0f)
+					.HeightOverride(64.0f)
 					[
-						CharacterBrush.IsValid()
-						? SNew(SImage)
-							.Image(CharacterBrush.Get())
-						: SNew(SImage)
-							.Image(FCoreStyle::Get().GetBrush("WhiteBrush"))
-							.ColorAndOpacity(FSlateColor(FLinearColor(0.12f, 0.10f, 0.08f, 1.0f)))
+						SNew(SBorder)
+						.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+						.BorderBackgroundColor(FLinearColor(0.85f, 0.68f, 0.25f, 1.0f))
+						.Padding(FMargin(2.0f))
+						[
+							SNew(SImage)
+							.Image(this, &SPanFightersMasterWidget::GetSelectedCharacterCardAvatar)
+						]
+					]
+				]
+
+				// Character Details on Right
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				[
+					SNew(SVerticalBox)
+
+					// Name in BOLD WHITE thick font
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(0.0f, 0.0f, 0.0f, 3.0f)
+					[
+						SNew(STextBlock)
+						.Text(this, &SPanFightersMasterWidget::GetSelectedCharacterCardName)
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+						.ColorAndOpacity(FSlateColor(FLinearColor::White))
+						.ShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.90f))
+						.ShadowOffset(FVector2D(1.0f, 1.0f))
+					]
+
+					// Title in finer font
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(0.0f, 0.0f, 0.0f, 2.0f)
+					[
+						SNew(STextBlock)
+						.Text(this, &SPanFightersMasterWidget::GetSelectedCharacterCardSubtitle)
+						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 11))
+						.ColorAndOpacity(FSlateColor(FLinearColor(0.90f, 0.85f, 0.78f, 0.95f)))
+					]
+
+					// Attributes in finer font
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(this, &SPanFightersMasterWidget::GetSelectedCharacterCardDescription)
+						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 10))
+						.ColorAndOpacity(FSlateColor(FLinearColor(0.80f, 0.75f, 0.68f, 0.85f)))
 					]
 				]
 			]
+		];
+}
 
-			// Description
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(0.0f, 8.0f, 0.0f, 10.0f)
-			[
-				SNew(STextBlock)
-				.Text(Description)
-				.Font(FCoreStyle::GetDefaultFontStyle("Regular", 10))
-				.ColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.80f, 0.75f, 0.90f)))
-			]
+TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterGridSlot(
+	EPanFightersCharacter CharId,
+	const FText& SlotName,
+	TSharedPtr<FSlateBrush> AvatarBrush,
+	bool bIsAvailable)
+{
+	const float SlotSize = 118.0f;
 
-			// Select Button
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Fill)
+	if (!bIsAvailable)
+	{
+		// Locked slots: 60% opacity dark semi-transparent tile with "PRÓXIMAMENTE" centered in clean subtle uppercase. No padlocks!
+		return SNew(SBox)
+			.WidthOverride(SlotSize)
+			.HeightOverride(SlotSize)
 			[
-				SNew(SBox)
-				.HeightOverride(38.0f)
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.08f, 0.06f, 0.05f, 0.55f))
+				.Padding(FMargin(1.5f))
 				[
-					SNew(SButton)
-					.ButtonStyle(&FCoreStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
-					.ButtonColorAndOpacity(FSlateColor(AccentColor))
-					.OnClicked(this, &SPanFightersMasterWidget::OnCharacterClicked, CharacterId)
+					SNew(SBorder)
+					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(FLinearColor(0.16f, 0.13f, 0.10f, 0.60f))
+					.Padding(FMargin(4.0f))
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
-						.Text(FText::FromString(TEXT("SELECCIONAR")))
-						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
-						.ColorAndOpacity(FSlateColor(FLinearColor::White))
+						.Text(FText::FromString(TEXT("PRÓXIMAMENTE")))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 9))
+						.ColorAndOpacity(FSlateColor(FLinearColor(0.60f, 0.55f, 0.50f, 0.55f)))
+					]
+				]
+			];
+	}
+
+	// Active slots (POLLO BLANCO & POLLO CHOCOLATE): 3D portrait, clean name tag at top, glowing yellow/golden highlight when selected
+	return SNew(SBox)
+		.WidthOverride(SlotSize)
+		.HeightOverride(SlotSize)
+		[
+			SNew(SButton)
+			.ButtonStyle(FCoreStyle::Get(), "NoBorder")
+			.ContentPadding(FMargin(0.0f))
+			.OnClicked(FOnClicked::CreateSP(this, &SPanFightersMasterWidget::OnCharacterSlotClicked, CharId))
+			[
+				SNew(SOverlay)
+
+				// 1. 3D Character Portrait
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Fill)
+				.VAlign(VAlign_Fill)
+				.Padding(4.0f)
+				[
+					AvatarBrush.IsValid()
+					? SNew(SImage).Image(AvatarBrush.Get())
+					: SNew(SImage).Image(FCoreStyle::Get().GetBrush("WhiteBrush")).ColorAndOpacity(FSlateColor(FLinearColor(0.15f, 0.12f, 0.10f, 1.0f)))
+				]
+
+				// 2. Clean Top Name Tag (ONLY the character name)
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Top)
+				.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(FLinearColor(0.06f, 0.04f, 0.03f, 0.88f))
+					.Padding(FMargin(8.0f, 2.5f))
+					[
+						SNew(STextBlock)
+						.Text(SlotName)
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 8))
+						.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.95f, 0.90f, 1.0f)))
+					]
+				]
+
+				// 3. Glowing Yellow/Golden contour when selected!
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Fill)
+				.VAlign(VAlign_Fill)
+				[
+					SNew(SBorder)
+					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+					.BorderBackgroundColor_Raw(this, &SPanFightersMasterWidget::GetSelectedSlotBorderColor, CharId)
+					.Padding(FMargin(3.5f))
+					[
+						SNullWidget::NullWidget
+					]
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SPanFightersMasterWidget::BuildCharacterSelectMenu()
+{
+	return SNew(SOverlay)
+
+	// TOP TITLE BANNER (Rustic dark wood panel with bronze border, rivets, and warm golden stylized text)
+	+ SOverlay::Slot()
+	.HAlign(HAlign_Center)
+	.VAlign(VAlign_Top)
+	.Padding(0.0f, 22.0f, 0.0f, 0.0f)
+	[
+		SNew(SBox)
+		.WidthOverride(500.0f)
+		.HeightOverride(90.0f)
+		[
+			SNew(SImage)
+			.Image(BrushTitleBanner.IsValid() ? BrushTitleBanner.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+		]
+	]
+
+	// TOP-LEFT CARD: Character Information Card (No '1P', no ribbons, bold white font)
+	+ SOverlay::Slot()
+	.HAlign(HAlign_Left)
+	.VAlign(VAlign_Top)
+	.Padding(44.0f, 36.0f, 0.0f, 0.0f)
+	[
+		BuildCharacterInfoCard()
+	]
+
+	// RIGHT SIDE: Elegant 3x3 Fighter Grid Board (Dark leather/wood, stitching, golden rounded frame with rivets)
+	+ SOverlay::Slot()
+	.HAlign(HAlign_Right)
+	.VAlign(VAlign_Center)
+	.Padding(0.0f, 25.0f, 48.0f, 0.0f)
+	[
+		SNew(SBox)
+		.WidthOverride(445.0f)
+		.HeightOverride(430.0f)
+		[
+			SNew(SOverlay)
+
+			// Board Background Texture
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			[
+				SNew(SImage)
+				.Image(BrushGridBg.IsValid() ? BrushGridBg.Get() : FCoreStyle::Get().GetBrush("WhiteBrush"))
+			]
+
+			// 3x3 Slots Inner Container
+			+ SOverlay::Slot()
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			.Padding(20.0f, 20.0f, 20.0f, 20.0f)
+			[
+				SNew(SVerticalBox)
+
+				// Row 1 (Pollo Blanco, Pollo Chocolate, Próximamente)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::PolloBlanco, FText::FromString(TEXT("POLLO BLANCO")), BrushPolloBlanco, true)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::PolloChocolate, FText::FromString(TEXT("POLLO CHOCOLATE")), BrushPolloChocolate, true)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+				]
+
+				// Row 2 (Próximamente x3)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 10.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+				]
+
+				// Row 3 (Próximamente x3)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 10.0f, 0.0f)
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						BuildCharacterGridSlot(EPanFightersCharacter::None, FText::GetEmpty(), nullptr, false)
 					]
 				]
 			]
 		]
 	];
+	// Bottom area is completely clean (no buttons) to let pedestal, character, and dirt ground shine naturally!
 }
 
-// --------------------------------------------------------------------------
-// STAGE SELECT MENU BUILDER (Con imágenes reales de cada mapa)
 // --------------------------------------------------------------------------
 TSharedRef<SWidget> SPanFightersMasterWidget::BuildStageSelectMenu()
 {

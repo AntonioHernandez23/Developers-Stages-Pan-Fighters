@@ -48,6 +48,26 @@ public:
 	/** Keyboard input handling for ESC and P key pause toggle */
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
+	/** Mouse interaction for 3D character preview rotation in character selection */
+	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+
+	// Character selection helpers
+	TSharedRef<SWidget> BuildCharacterInfoCard();
+	TSharedRef<SWidget> BuildCharacterGridSlot(EPanFightersCharacter CharId, const FText& SlotName, TSharedPtr<FSlateBrush> AvatarBrush, bool bIsAvailable);
+	FText GetSelectedCharacterCardName() const;
+	FText GetSelectedCharacterCardSubtitle() const;
+	FText GetSelectedCharacterCardDescription() const;
+	const FSlateBrush* GetSelectedCharacterCardAvatar() const;
+	FSlateColor GetSelectedSlotBorderColor(EPanFightersCharacter SlotChar) const;
+	FReply OnCharacterSlotClicked(EPanFightersCharacter InChar);
+	FReply OnConfirmCharacterClicked();
+
+	// 3D character rotation dragging
+	bool bIsDraggingRooster = false;
+	FVector2D LastMouseDragPos = FVector2D::ZeroVector;
+
 	/** Switches the current screen state */
 	void SetScreenState(EPanFightersScreenState NewState);
 
@@ -172,6 +192,10 @@ private:
 	TSharedPtr<FSlateBrush> BrushPolloBlanco;
 	TSharedPtr<FSlateBrush> BrushPolloChocolate;
 	TSharedPtr<FSlateBrush> BrushPolloAmarillo;
+	TSharedPtr<FSlateBrush> BrushTitleBanner;
+	TSharedPtr<FSlateBrush> BrushCardBg;
+	TSharedPtr<FSlateBrush> BrushGridBg;
+	TSharedPtr<FSlateBrush> BrushSlotLocked;
 
 	// In-game combat HUD & Hit reaction state
 	float HitReactionAlpha = 0.0f;
